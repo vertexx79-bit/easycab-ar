@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>EasyCab AR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
+<style>
+/* Layout: one screen — the model fills it, a bottom sheet holds the size and the AR button */
+:root{
+  --bg:#edf0ee; --panel:#ffffff; --ink:#18211d; --muted:#5a6762; --line:#d3dbd7;
+  --accent:#1d7a58; --accent-ink:#ffffff; --scene:#e2e8e4; --warn:#9a6200; --warn-soft:#fbefd6;
+  --f-body:'Onest',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --f-mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){ :root{
+  --bg:#111614; --panel:#19201d; --ink:#e4ebe7; --muted:#97a59f; --line:#2b3531;
+  --accent:#3fbf8b; --accent-ink:#0b1410; --scene:#1b2320; --warn:#e3a63c; --warn-soft:#3a2d14; color-scheme:dark } }
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);display:flex;flex-direction:column;
+  padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+model-viewer{flex:1;width:100%;min-height:0;background:var(--scene);--poster-color:transparent}
+.sheet{background:var(--panel);border-top:1px solid var(--line);padding:14px max(16px,env(safe-area-inset-left,0px)) 16px;display:grid;gap:10px}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{margin:0;font-size:16px;font-weight:600}
+.size{font-family:var(--f-mono);font-size:14px;color:var(--muted);font-variant-numeric:tabular-nums}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:50px;border-radius:12px;border:0;background:var(--accent);color:var(--accent-ink);font:600 16px var(--f-body);width:100%;cursor:pointer;text-decoration:none}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);min-height:44px;font-weight:500;font-size:14px}
+.hint{margin:0;color:var(--muted);font-size:13px}
+.note{margin:0;padding:10px 12px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:13px}
+model-viewer [slot="ar-button"]{display:none}
+#arPrompt{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);padding:10px 14px;border-radius:12px;background:rgba(0,0,0,.6);color:#fff;font-size:14px;white-space:nowrap}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<model-viewer id="mv" alt="Шкаф в масштабе 1:1" camera-controls touch-action="pan-y" shadow-intensity="1" shadow-softness="0.6" environment-image="neutral" tone-mapping="aces" exposure="0.85"
+  ar ar-modes="webxr scene-viewer quick-look" ar-scale="fixed" ar-placement="floor" camera-orbit="32deg 78deg auto">
+  <button slot="ar-button"></button>
+  <div slot="ar-prompt" id="arPrompt">Медленно ведите телефоном над полом</div>
+</model-viewer>
+<div class="sheet">
+  <div class="row"><h1 id="name">Шкаф</h1><span class="size" id="size">—</span></div>
+  <button class="btn" id="arBtn" type="button" hidden>Поставить в комнате</button>
+  <p class="note" id="noAR" hidden>Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.</p>
+  <p class="hint" id="tip">Масштаб 1:1 зафиксирован: шкаф встанет в реальном размере. Пальцем можно повернуть и передвинуть.</p>
+  <a class="btn ghost" id="dl" download="shkaf.glb">Скачать модель (GLB)</a>
+</div>
+<script>
+(function(){
+const module={exports:{}};
+// MODEL-START
+const SHEET=[2800,2070];
+const GUIDES=[250,300,350,400,450,500,550,600];
+const BODY_COLORS={white:['Белый','#f0f0eb'],grey:['Серый','#a5aaa7'],oak:['Дуб','#c7a474']};
+const FAC_COLORS={white:['Белый','#f7f6f1'],sage:['Шалфей','#9db1a1'],graphite:['Графит','#40464a'],oak:['Дуб','#b78a5a']};
+const GROUP_ORDER=['Боковина','Крыша','Дно','Перегородка','Полка-разделитель','Полка съёмная','Цоколь','Задняя стенка','Фасад распашной','Фасад ящика','Ящик: боковина','Ящик: перед/зад','Ящик: дно','Штанга Ø25'];
+
+function pnum(s){ if(typeof s==='number') return s; const v=parseFloat(String(s==null?'':s).replace(',','.')); return isFinite(v)?v:NaN; }
+function f1(v){ const r=Math.round(v*10)/10; return String(Object.is(r,-0)?0:r).replace('.',','); }
+function clone(o){ return JSON.parse(JSON.stringify(o)); }
+function byRule(L,rules,step){
+  const r=(rules||[]).filter(x=>isFinite(x[0])&&isFinite(x[1])&&x[1]>0).slice().sort((a,b)=>a[0]-b[0]);
+  if(!r.length) return 2;
+  for(const [lim,n] of r) if(L<=lim) return Math.max(1,Math.round(n));
+  const last=r[r.length-1];
+  return Math.max(1,Math.round(last[1]+Math.ceil((L-last[0])/Math.max(50,step||250))));
+}
+function spread(a0,a1,n,off){
+  const L=a1-a0;
+  if(n<=1||L<=2*off) return [(a0+a1)/2];
+  const a=a0+off,b=a1-off;
+  return Array.from({length:n},(_,k)=>a+k*(b-a)/(n-1));
+}
+
+const BASE={W:1200,H:2100,D:580,P:80,Tn:16,Ta:'',anchor:'outer',top:'overlay',bottom:'inset',back:'groove',backT:4,body:'white',
+  facade:{style:'panel',color:'white',gap:2},
+  fast:{type:'confirmat',offset:50,step:250,rules:[[300,2],[600,3],[900,4]]},
+  hinge:{offset:100,step:450,rules:[[900,2],[1600,3],[2000,4]]},
+  sections:[{w:'*',drawers:0,dh:200,shelves:4,rod:false,doors:'auto'},{w:'*',drawers:3,dh:200,shelves:0,rod:true,doors:'auto'}],
+  motion:{
+    door:{angle:110,open:{dur:900,mode:'smooth',keys:[[0,0],[30,8],[80,90],[100,100]]},close:{dur:1100,mode:'smooth',keys:[[0,0],[45,75],[70,93],[100,100]]}},
+    drawer:{share:1,open:{dur:700,mode:'smooth',keys:[[0,0],[25,10],[75,92],[100,100]]},close:{dur:900,mode:'smooth',keys:[[0,0],[50,80],[75,96],[100,100]]}}},
+  over:{}};
+const MPRESETS={
+  soft:{label:'С доводчиком',open:{mode:'smooth',keys:[[0,0],[30,8],[80,90],[100,100]]},close:{mode:'smooth',keys:[[0,0],[45,75],[70,93],[100,100]]}},
+  smooth:{label:'Плавно',open:{mode:'smooth',keys:[[0,0],[20,6],[50,50],[80,94],[100,100]]},close:{mode:'smooth',keys:[[0,0],[20,6],[50,50],[80,94],[100,100]]}},
+  linear:{label:'Равномерно',open:{mode:'linear',keys:[[0,0],[100,100]]},close:{mode:'linear',keys:[[0,0],[100,100]]}},
+  push:{label:'Толкатель',open:{mode:'smooth',keys:[[0,0],[8,22],[22,30],[100,100]]},close:{mode:'smooth',keys:[[0,0],[45,75],[70,93],[100,100]]}},
+  bounce:{label:'С отскоком',open:{mode:'smooth',keys:[[0,0],[55,88],[78,104],[100,100]]},close:{mode:'smooth',keys:[[0,0],[55,90],[80,103],[100,100]]}}
+};
+// keyframes in percent: [[time%, position%], ...]; monotone cubic (no false wobble) or straight segments
+function makeCurve(keys,mode){
+  const k=(keys||[]).filter(p=>isFinite(p[0])&&isFinite(p[1])).map(p=>[p[0]/100,p[1]/100]).sort((a,b)=>a[0]-b[0]);
+  if(k.length<2) return t=>t;
+  const n=k.length, xs=k.map(p=>p[0]), ys=k.map(p=>p[1]);
+  const seg=t=>{ let i=0; while(i<n-2&&t>xs[i+1]) i++; return i; };
+  if(mode==='linear') return t=>{ t=Math.min(1,Math.max(0,t)); const i=seg(t), h=(xs[i+1]-xs[i])||1e-6, u=Math.min(1,Math.max(0,(t-xs[i])/h)); return ys[i]+(ys[i+1]-ys[i])*u; };
+  const d=[], m=new Array(n).fill(0);
+  for(let i=0;i<n-1;i++) d[i]=(ys[i+1]-ys[i])/((xs[i+1]-xs[i])||1e-6);
+  m[0]=d[0]; m[n-1]=d[n-2];
+  for(let i=1;i<n-1;i++) m[i]=d[i-1]*d[i]<=0?0:(d[i-1]+d[i])/2;
+  for(let i=0;i<n-1;i++){
+    if(d[i]===0){ m[i]=0; m[i+1]=0; continue; }
+    const a=m[i]/d[i], b=m[i+1]/d[i], q=a*a+b*b;
+    if(q>9){ const tau=3/Math.sqrt(q); m[i]=tau*a*d[i]; m[i+1]=tau*b*d[i]; }
+  }
+  return t=>{
+    t=Math.min(1,Math.max(0,t));
+    const i=seg(t), h=(xs[i+1]-xs[i])||1e-6, u=Math.min(1,Math.max(0,(t-xs[i])/h)), u2=u*u, u3=u2*u;
+    return (2*u3-3*u2+1)*ys[i]+(u3-2*u2+u)*h*m[i]+(-2*u3+3*u2)*ys[i+1]+(u3-u2)*h*m[i+1];
+  };
+}
+const PRESETS={
+  wardrobe:{label:'Шкаф 1200',sub:'полки; ящики и штанга по высоте',s:{root:{id:'n0',size:'*',split:'v',kids:[
+    {id:'n1',size:'*',split:'none',kids:[],c:{drawers:0,dh:200,shelves:4,rod:false,doors:'auto'}},
+    {id:'n2',size:'*',split:'h',kids:[
+      {id:'n3',size:'600',split:'none',kids:[],c:{drawers:3,dh:200,shelves:0,rod:false,doors:'0'}},
+      {id:'n4',size:'*',split:'none',kids:[],c:{drawers:0,dh:200,shelves:0,rod:true,doors:'auto'}}]}]}}},
+  tumba:{label:'Тумба 600',sub:'4 ящика на всю высоту',s:{W:600,H:820,D:560,P:100,top:'inset',back:'overlay',backT:3,facade:{style:'flat',color:'graphite',gap:2},sections:[{w:'*',drawers:4,dh:180,shelves:0,rod:false,doors:'0'}]}},
+  rack:{label:'Стеллаж 800',sub:'открытый, 5 полок',s:{W:800,H:1800,D:350,P:0,back:'overlay',backT:3,body:'oak',facade:{style:'flat',color:'white',gap:2},sections:[{w:'*',drawers:0,dh:200,shelves:5,rod:false,doors:'0'}]}},
+  penal:{label:'Пенал 450',sub:'2 ящика + полки за дверью',s:{W:450,H:2100,D:560,P:80,facade:{style:'panel',color:'sage',gap:2},sections:[{w:'*',drawers:2,dh:220,shelves:3,rod:false,doors:'1'}]}}
+};
+function mergeState(base,over){
+  const out=clone(base);
+  for(const k of Object.keys(over||{})){
+    const v=over[k];
+    if(v&&typeof v==='object'&&!Array.isArray(v)&&out[k]&&typeof out[k]==='object'&&!Array.isArray(out[k])) out[k]=Object.assign(out[k],clone(v));
+    else out[k]=clone(v);
+  }
+  return out;
+}
+function leafC(s){ return {drawers:s.drawers|0,dh:s.dh||200,shelves:s.shelves|0,rod:!!s.rod,doors:String(s.doors==null?'auto':s.doors)}; }
+function fromSections(secs){
+  if(!secs||!secs.length) return {id:'n0',size:'*',split:'none',kids:[],c:leafC({shelves:3})};
+  if(secs.length===1) return {id:'n0',size:'*',split:'none',kids:[],c:leafC(secs[0])};
+  return {id:'n0',size:'*',split:'v',kids:secs.map((s,i)=>({id:'n'+(i+1),size:s.w==null?'*':String(s.w),split:'none',kids:[],c:leafC(s)}))};
+}
+function normState(st){ if(!st.root) st.root=fromSections(st.sections); delete st.sections; st.plinth=plinthCfg(st); return st; }
+function countCols(node){ return node&&node.split==='v'&&node.kids&&node.kids.length>1?node.kids.length-1+node.kids.reduce((a,k)=>a+countCols(k),0):(node&&node.kids?node.kids.reduce((a,k)=>a+countCols(k),0):0); }
+function presetState(key){ return normState(mergeState(BASE,PRESETS[key].s)); }
+
+/* ---------- planes inside a section box ----------
+   A plane's position is never stored: it is derived from its rule and the current box every time.
+   So "stretch, then shrink back" always returns exactly where it started, and a plane cannot drift out of the box.
+   own — the face the plane belongs to ('min' | 'max' along the axis).
+   mode: near — fixed distance from its own face; far — fixed distance from the opposite face; pct — share of the box from its own face. */
+const PL_MODES=[['near','от своей грани'],['far','от противоположной'],['pct','доля']];
+function planeAt(pl,a0,a1,own){
+  const L=a1-a0, sgn=own==='max'?-1:1, base=own==='max'?a1:a0, opp=own==='max'?a0:a1;
+  let want;
+  if(pl.mode==='far') want=opp-sgn*(pnum(pl.far)||0);
+  else if(pl.mode==='pct') want=base+sgn*L*(pnum(pl.pct)||0)/100;
+  else want=base+sgn*(pnum(pl.near)||0);
+  const pos=Math.min(a1,Math.max(a0,want));
+  return {pos,want,out:Math.abs(pos-want)>0.05};
+}
+// distance of a plane from its own face, from the opposite face, and as a share — used to switch the rule without moving the plane
+function planeMeasures(pos,a0,a1,own){
+  const L=Math.max(1e-6,a1-a0), fromOwn=own==='max'?a1-pos:pos-a0;
+  return {near:Math.round(fromOwn*10)/10,far:Math.round((L-fromOwn)*10)/10,pct:Math.round(fromOwn/L*1000)/10};
+}
+const PL_FACES={front:['переда','зада'],back:['зада','переда'],left:['левого края','правого края'],right:['правого края','левого края']};
+function planeText(id,pl){
+  const [own,opp]=PL_FACES[id];
+  if(pl.mode==='far') return `${f1(pnum(pl.far)||0)} мм от ${opp}`;
+  if(pl.mode==='pct') return `${f1(pnum(pl.pct)||0)} % от ${own}`;
+  return `${f1(pnum(pl.near)||0)} мм от ${own}`;
+}
+const PLINTH_DEF={front:{mode:'near',near:50,far:450,pct:10},back:{on:true,mode:'near',near:0,far:450,pct:0},
+  sides:{on:true,sym:true},left:{mode:'near',near:0,far:500,pct:0},right:{mode:'near',near:0,far:500,pct:0},ribs:'auto'};
+function plinthCfg(st){
+  const p=Object.assign(clone(PLINTH_DEF),st.plinth||{});
+  ['front','back','left','right','sides'].forEach(k=>{ p[k]=Object.assign(clone(PLINTH_DEF[k]),p[k]||{}); });
+  if(p.sides.sym) p.right=Object.assign(clone(p.left));
+  return p;
+}
+// the plinth is a section of its own: a box (between the carcass sides, from the back to the front) with four planes
+function buildPlinth(st,out,box,P,T){
+  const c=plinthCfg(st), chk=out.checks, sidesOn=c.sides.on, backOn=c.back.on;
+  const L=planeAt(c.left,box.x0,box.x1,'min'), R=planeAt(c.right,box.x0,box.x1,'max');
+  const F=planeAt(c.front,box.z0,box.z1,'max'), B=planeAt(c.back,box.z0,box.z1,'min');
+  let XL=L.pos, XR=R.pos, ZF=F.pos, ZB=B.pos;
+  const yieldBy={left:0,right:0,front:0,back:0};
+  // too narrow: both side planes give way equally, the plinth stays centred
+  const minX=(sidesOn?2*T:0)+60;
+  if(XR-XL<minX){
+    const lack=minX-(XR-XL);
+    let nl=Math.max(box.x0,XL-lack/2), nr=Math.min(box.x1,XR+lack/2);
+    if(nr-nl<minX){ if(nl===box.x0) nr=Math.min(box.x1,nl+minX); else nl=Math.max(box.x0,nr-minX); }
+    yieldBy.left=XL-nl; yieldBy.right=nr-XR; XL=nl; XR=nr;
+    chk.push({lv:'warn',t:`Цоколь: боковые отступы не помещаются по ширине — уступили на ${f1(lack)} мм, при расширении вернутся сами`});
+  }
+  // too shallow: the back plank gives way, the front (visible) one stays put
+  const minZ=(backOn?2*T:T)+40;
+  if(ZF-ZB<minZ){
+    const lack=minZ-(ZF-ZB);
+    let nb=Math.max(box.z0,ZF-minZ), nf=ZF;
+    if(nf-nb<minZ){ nf=Math.min(box.z1,nb+minZ); yieldBy.front=nf-ZF; }
+    yieldBy.back=ZB-nb; ZB=nb; ZF=nf;
+    chk.push({lv:'warn',t:`Цоколь: не хватает ${f1(lack)} мм глубины — ${backOn?'задняя планка':'задняя граница'} сдвинута к переду, при увеличении глубины вернётся сама`});
+  }
+  if(XR-XL<minX-0.05||ZF-ZB<minZ-0.05) chk.push({lv:'err',t:`Цоколь: коробка ${f1(box.x1-box.x0)} × ${f1(box.z1-box.z0)} мм слишком мала для планок толщиной ${f1(T)} мм`});
+  [['left',L],['right',R],['front',F],['back',B]].forEach(([k,r])=>{ if(r.out&&!yieldBy[k]) chk.push({lv:'warn',t:`Цоколь: плоскость «${({left:'левая',right:'правая',front:'передняя',back:'задняя'})[k]}» упёрлась в край коробки (${planeText(k,c[k])})`}); });
+
+  const add=o=>{out.parts.push(o);return o;};
+  const len=XR-XL, zs0=ZB+(backOn?T:0), zs1=ZF-T;
+  const hF=`Высота = П = ${f1(P)}`;
+  add({id:'plinth-F',name:'Цоколь передний',grp:'Цоколь',mat:'ldsp',x0:XL,x1:XR,y0:0,y1:P,z0:ZF-T,z1:ZF,a:len,b:P,t:T,
+    f:[`Плоскость: ${planeText('front',c.front)}`,`Длина = между плоскостями «лево» и «право» = ${f1(len)}`,hF]});
+  if(backOn) add({id:'plinth-B',name:'Цоколь задний',grp:'Цоколь',mat:'ldsp',x0:XL,x1:XR,y0:0,y1:P,z0:ZB,z1:ZB+T,a:len,b:P,t:T,
+    f:[`Плоскость: ${planeText('back',c.back)}`,`Длина = ${f1(len)}`,hF]});
+  const sl=zs1-zs0;
+  if(sidesOn&&sl>1){
+    add({id:'plinth-L',name:'Цоколь боковой левый',grp:'Цоколь',mat:'ldsp',x0:XL,x1:XL+T,y0:0,y1:P,z0:zs0,z1:zs1,a:sl,b:P,t:T,
+      f:[`Плоскость: ${planeText('left',c.left)}`,`Длина = между передней и задней планками = ${f1(sl)}`,hF]});
+    add({id:'plinth-R',name:'Цоколь боковой правый',grp:'Цоколь',mat:'ldsp',x0:XR-T,x1:XR,y0:0,y1:P,z0:zs0,z1:zs1,a:sl,b:P,t:T,
+      f:[`Плоскость: ${planeText('right',c.right)}`,`Длина = ${f1(sl)}`,hF]});
+  }
+  // stiffening ribs: always evenly spaced across the current width (a share rule by nature)
+  const i0=XL+(sidesOn?T:0), i1=XR-(sidesOn?T:0), inner=i1-i0;
+  const nRib=c.ribs==='auto'?Math.max(0,Math.ceil(inner/900)-1):Math.max(0,Math.min(8,c.ribs|0));
+  for(let k=1;k<=nRib&&sl>1;k++){
+    const cx=i0+inner*k/(nRib+1);
+    add({id:'plinth-r'+k,name:`Поперечина цоколя ${k}`,grp:'Цоколь',mat:'ldsp',x0:cx-T/2,x1:cx+T/2,y0:0,y1:P,z0:zs0,z1:zs1,a:sl,b:P,t:T,
+      f:[`Делит цоколь на ${nRib+1} равные части — при растяжении остаётся посередине своих долей`,`Длина = ${f1(sl)}`,hF]});
+  }
+  out.plinth={box:{x0:box.x0,x1:box.x1,y0:0,y1:P,z0:box.z0,z1:box.z1},cfg:c,ribs:nRib,
+    planes:[{id:'front',axis:'z',pos:ZF,own:'max',a0:box.z0,a1:box.z1,yield:yieldBy.front,out:F.out},
+            {id:'back',axis:'z',pos:ZB,own:'min',a0:box.z0,a1:box.z1,yield:yieldBy.back,out:B.out},
+            {id:'left',axis:'x',pos:XL,own:'min',a0:box.x0,a1:box.x1,yield:yieldBy.left,out:L.out},
+            {id:'right',axis:'x',pos:XR,own:'max',a0:box.x0,a1:box.x1,yield:yieldBy.right,out:R.out}]};
+}
+
+function build(st,opt){
+  opt=opt||{};
+  const Tn=st.Tn, Tm=pnum(st.Ta);
+  const T=(!opt.nominal&&Tm>0)?Tm:Tn;
+  let W=st.W;
+  if(!opt.nominal&&st.anchor==='inner'&&T!==Tn) W=st.W+(T-Tn)*(countCols(st.root)+1);
+  const H=st.H, D=st.D, P=st.P, bt=st.backT, g=st.facade.gap, Tf=16;
+  const out={W,H,D,P,T,parts:[],hw:[],joints:[],checks:[],guides:[],sec:[],movs:[]};
+  const parts=out.parts, chk=out.checks;
+  const add=o=>{parts.push(o);return o;};
+  const groove=st.back==='groove';
+  const zc0=groove?0:bt, zb=groove?16+bt:bt;
+  const topO=st.top==='overlay', botO=st.bottom==='overlay';
+  const ySB=botO?P+T:0, ySTop=topO?H-T:H;
+  const sideH=ySTop-ySB, carcD=D-zc0;
+  const depthF=groove?`Г = ${f1(D)}`:`Г − задняя стенка ${f1(bt)} = ${f1(carcD)}`;
+
+  // fasteners on a joint ("ниточка")
+  const J=(key,label,a0,a1,pt,axis)=>{
+    const L=a1-a0, rule=byRule(L,st.fast.rules,st.fast.step), ov=st.over&&st.over[key];
+    const nn=ov>0?ov:rule;
+    out.joints.push({key,label,L,n:nn,rule,own:ov>0});
+    spread(a0,a1,nn,st.fast.offset).forEach(z=>out.hw.push({k:st.fast.type,joint:key,p:pt(z),axis}));
+  };
+
+  const sideF=[`Высота = В${topO?' − T':''}${botO?' − П − T':''} = ${f1(H)}${topO?' − '+f1(T):''}${botO?' − '+f1(P)+' − '+f1(T):''} = ${f1(sideH)}`,`Глубина = ${depthF}`];
+  add({id:'side-L',name:'Боковина левая',grp:'Боковина',mat:'ldsp',x0:0,x1:T,y0:ySB,y1:ySTop,z0:zc0,z1:D,a:sideH,b:carcD,t:T,f:sideF});
+  add({id:'side-R',name:'Боковина правая',grp:'Боковина',mat:'ldsp',x0:W-T,x1:W,y0:ySB,y1:ySTop,z0:zc0,z1:D,a:sideH,b:carcD,t:T,f:sideF});
+  const tw=topO?W:W-2*T;
+  add({id:'top',name:'Крыша',grp:'Крыша',mat:'ldsp',x0:topO?0:T,x1:topO?W:W-T,y0:H-T,y1:H,z0:zc0,z1:D,a:tw,b:carcD,t:T,
+    f:[topO?`Ширина = Ш = ${f1(W)} (накладная)`:`Ширина = Ш − 2·T = ${f1(W)} − 2·${f1(T)} = ${f1(tw)} (вкладная)`,`Глубина = ${depthF}`]});
+  const bw=botO?W:W-2*T;
+  add({id:'bottom',name:'Дно',grp:'Дно',mat:'ldsp',x0:botO?0:T,x1:botO?W:W-T,y0:P,y1:P+T,z0:zc0,z1:D,a:bw,b:carcD,t:T,
+    f:[botO?`Ширина = Ш = ${f1(W)} (под боковинами)`:`Ширина = Ш − 2·T = ${f1(W)} − 2·${f1(T)} = ${f1(bw)} (между боковинами)`,`Глубина = ${depthF}`,`Высота от пола = П = ${f1(P)}`]});
+  if(P>0) buildPlinth(st,out,{x0:botO?0:T,x1:botO?W:W-T,z0:zc0,z1:D},P,T);
+  if(groove){
+    const bx0=T-8,bx1=W-T+8,by0=P+T-8,by1=H-T+8;
+    add({id:'back',name:'Задняя стенка',grp:'Задняя стенка',mat:'hdf',x0:bx0,x1:bx1,y0:by0,y1:by1,z0:16,z1:16+bt,a:by1-by0,b:bx1-bx0,t:bt,
+      f:['В паз глубиной 8 мм, паз в 16 мм от заднего края',`Ширина = Ш − 2·T + 2·8 = ${f1(bx1-bx0)}`,`Высота = В − П − 2·T + 2·8 = ${f1(by1-by0)}`]});
+  } else {
+    add({id:'back',name:'Задняя стенка',grp:'Задняя стенка',mat:'hdf',x0:0,x1:W,y0:P,y1:H,z0:0,z1:bt,a:H-P,b:W,t:bt,f:['Внакладку на задние кромки корпуса',`${f1(W)} × ${f1(H-P)} = Ш × (В − П)`]});
+  }
+  // joints of the carcass
+  J('sL-top','Боковина левая — крыша',zc0,D,z=>topO?[T/2,H,z]:[0,H-T/2,z],topO?'y':'x');
+  J('sR-top','Боковина правая — крыша',zc0,D,z=>topO?[W-T/2,H,z]:[W,H-T/2,z],topO?'y':'x');
+  J('sL-bot','Боковина левая — дно',zc0,D,z=>botO?[T/2,P,z]:[0,P+T/2,z],botO?'y':'x');
+  J('sR-bot','Боковина правая — дно',zc0,D,z=>botO?[W-T/2,P,z]:[W,P+T/2,z],botO?'y':'x');
+
+  // division tree: a node is split by width (partitions) or by height (fixed shelves), leaves hold the filling
+  out.Wi=W-2*T;
+  out.nodes=[];
+  let hingeTotal=0, simplified=0, leafN=0, pn=0, dn=0;
+  const facade=(id,name,grp,x0,x1,y0,y1,extra)=>{
+    const w=x1-x0,h=y1-y0;
+    const p={id,name,grp,mat:'facade',facade:true,x0,x1,y0,y1,z0:D,z1:D+Tf,a:h,b:w,t:Tf,f:[`${f1(w)} × ${f1(h)} мм, зазор ${f1(g)} мм`].concat(extra||[])};
+    if(st.facade.style==='panel'){
+      const fr=70;
+      if(w>=2*fr+80&&h>=2*fr+80){
+        p.pieces=[[x0,x0+fr,y0,y1,D,D+Tf],[x1-fr,x1,y0,y1,D,D+Tf],[x0+fr,x1-fr,y0,y0+fr,D,D+Tf],[x0+fr,x1-fr,y1-fr,y1,D,D+Tf],[x0+fr,x1-fr,y0+fr,y1-fr,D,D+Tf-6]];
+        p.f.push('Стиль: филёнка, рамка 70 мм, поле утоплено на 6 мм');
+      } else { p.simplified=true; simplified++; p.f.push('Стиль: филёнка → гладкий (фасад узкий для рамки 70 мм)'); }
+    }
+    return add(p);
+  };
+  const sizes=(kids,avail,what)=>{
+    const ws=kids.map(k=>{const v=pnum(k.size);return isFinite(v)&&v>0?v:null;});
+    const fixed=ws.reduce((a,v)=>a+(v||0),0), autos=ws.filter(v=>v===null).length, rem=avail-fixed;
+    const r=ws.map(v=>v===null?(autos?rem/autos:0):v);
+    if(autos===0&&Math.abs(rem)>0.5){ r[r.length-1]+=rem; chk.push({lv:'warn',t:`${what}: сумма размеров не равна ${f1(avail)} мм — последняя часть подогнана до ${f1(r[r.length-1])} мм`}); }
+    if(autos>0&&rem/autos<100) chk.push({lv:'err',t:`${what}: заданные размеры не оставляют места остальным частям (всего ${f1(avail)} мм)`});
+    return r;
+  };
+  const leaf=(s,rec,name,b,f)=>{
+    const id=rec.id, info=rec.info, xa=b.x0, xb=b.x1, w=xb-xa, fl=f.fx0, fr=f.fx1, yF0=f.fy0, yFT=f.fy1;
+    leafN++;
+    const nd=Math.max(0,s.drawers|0), ns=Math.max(0,s.shelves|0);
+    const full=nd>0&&ns===0&&!s.rod;
+    const dhE=full?(yFT-yF0)/nd:(pnum(s.dh)||200);
+    const yDZ=yF0+nd*dhE;
+    let yU0=b.y0;
+    if(nd>0&&!full){
+      if(yDZ>yFT-150) chk.push({lv:'err',t:`${name}: ящики занимают ${f1(nd*dhE)} мм — над ними не остаётся места`});
+      add({id:`${id}-div`,node:id,name:`Разделитель над ящиками, ${name}`,grp:'Полка-разделитель',mat:'ldsp',x0:xa,x1:xb,y0:yDZ-T/2,y1:yDZ+T/2,z0:zb,z1:D,a:w,b:D-zb,t:T,
+        f:[`Ширина = ширина проёма = ${f1(w)}`,`Глубина = Г − ${f1(zb)} = ${f1(D-zb)}`,`Высота над полом = низ фасадов + ${nd}·${f1(dhE)} = ${f1(yDZ)}`]});
+      J(`${id}-div-L`,`${name}: разделитель — левая стенка`,zb,D,z=>[xa-T,yDZ,z],'x');
+      J(`${id}-div-R`,`${name}: разделитель — правая стенка`,zb,D,z=>[xb+T,yDZ,z],'x');
+      yU0=yDZ+T/2;
+    }
+    if(nd>0){
+      const Di=D-zb, fit=GUIDES.filter(v=>v<=Di-10), Lg=fit.length?fit[fit.length-1]:0;
+      if(!Lg) chk.push({lv:'err',t:`${name}: глубина внутри ${f1(Di)} мм — нет подходящих направляющих (от 250 мм)`});
+      else info.push(`направляющие ${Lg} мм`);
+      if(full) info.push(`${nd} ящ. на всю высоту по ${f1(dhE)} мм`);
+      for(let k=0;k<nd;k++){
+        const mid=`${id}-dr${k}`;
+        out.movs.push({id:mid,type:'drawer',ext:Lg||300,label:`Ящик ${name}-${k+1}`});
+        const fp=facade(`${id}-df${k}`,`Фасад ящика ${name}-${k+1}`,'Фасад ящика',fl+g/2,fr-g/2,yF0+k*dhE+g/2,yF0+(k+1)*dhE-g/2,Lg?[`Направляющие ${Lg} мм`]:[]);
+        fp.mov=mid; fp.node=id;
+        if(!Lg) continue;
+        const by0=(k===0?b.y0:yF0+k*dhE)+12;
+        const bh=Math.max(60,Math.min(dhE-60,220));
+        if(dhE-60<60) chk.push({lv:'warn',t:`${name}: фасад ящика ${f1(dhE)} мм — короб получается ниже 60 мм`});
+        const bxa=xa+13,bxb=xb-13,bL=Lg-10,bz1=D-2,bz0=bz1-bL,bwid=bxb-bxa, nm=`ящик ${name}-${k+1}`;
+        add({mov:mid,node:id,id:`${id}-b${k}-L`,name:`Боковина, ${nm}`,grp:'Ящик: боковина',mat:'ldsp',x0:bxa,x1:bxa+T,y0:by0,y1:by0+bh,z0:bz0,z1:bz1,a:bL,b:bh,t:T,f:[`Длина = направляющие − 10 = ${f1(bL)}`,`Высота = фасад − 60, не больше 220 = ${f1(bh)}`]});
+        add({mov:mid,node:id,id:`${id}-b${k}-R`,name:`Боковина, ${nm}`,grp:'Ящик: боковина',mat:'ldsp',x0:bxb-T,x1:bxb,y0:by0,y1:by0+bh,z0:bz0,z1:bz1,a:bL,b:bh,t:T,f:[`Длина = направляющие − 10 = ${f1(bL)}`]});
+        add({mov:mid,node:id,id:`${id}-b${k}-F`,name:`Перед короба, ${nm}`,grp:'Ящик: перед/зад',mat:'ldsp',x0:bxa+T,x1:bxb-T,y0:by0,y1:by0+bh,z0:bz1-T,z1:bz1,a:bwid-2*T,b:bh,t:T,f:[`Ширина = проём − 2·13 − 2·T = ${f1(bwid-2*T)}`]});
+        add({mov:mid,node:id,id:`${id}-b${k}-B`,name:`Зад короба, ${nm}`,grp:'Ящик: перед/зад',mat:'ldsp',x0:bxa+T,x1:bxb-T,y0:by0,y1:by0+bh,z0:bz0,z1:bz0+T,a:bwid-2*T,b:bh,t:T,f:[`Ширина = проём − 2·13 − 2·T = ${f1(bwid-2*T)}`]});
+        add({mov:mid,node:id,id:`${id}-b${k}-D`,name:`Дно, ${nm}`,grp:'Ящик: дно',mat:'hdf',x0:bxa,x1:bxb,y0:by0-bt,y1:by0,z0:bz0,z1:bz1,a:bL,b:bwid,t:bt,f:[`${f1(bwid)} × ${f1(bL)} = ширина короба × длина`]});
+        out.guides.push(Lg);
+        out.hw.push({k:'guide',box:[xa,xa+12,by0+10,by0+45,D-Lg-2,D-2]});
+        out.hw.push({k:'guide',box:[xb-12,xb,by0+10,by0+45,D-Lg-2,D-2]});
+      }
+    }
+    if(full) return;
+    const yU1=b.y1, Hu=yU1-yU0, lim=T<18?800:900;
+    if(ns>0&&w-2>lim) chk.push({lv:'warn',t:`${name}: полка ${f1(w-2)} мм может прогибаться — для ЛДСП ${f1(T)} мм лучше не шире ${lim} мм`});
+    for(let k=1;k<=ns;k++){
+      const yc=yU0+k*Hu/(ns+1), sz0=zb+2, sz1=D-20;
+      add({id:`${id}-sh${k}`,node:id,name:`Полка ${name}-${k}`,grp:'Полка съёмная',mat:'ldsp',x0:xa+1,x1:xb-1,y0:yc-T/2,y1:yc+T/2,z0:sz0,z1:sz1,a:w-2,b:sz1-sz0,t:T,
+        f:[`Ширина = проём − 2 = ${f1(w)} − 2 = ${f1(w-2)}`,`Глубина = Г − ${f1(zb+2)} − 20 (отступ спереди) = ${f1(sz1-sz0)}`,`Шаг полок = ${f1(Hu)} / ${ns+1} = ${f1(Hu/(ns+1))}`]});
+      [sz0+50,sz1-50].forEach(z=>{ out.hw.push({k:'holder',p:[xa+4,yc-T/2-3,z],axis:'x'}); out.hw.push({k:'holder',p:[xb-4,yc-T/2-3,z],axis:'x'}); });
+    }
+    if(ns>0) info.push(`${ns} пол. по ${f1(w-2)} мм`);
+    if(s.rod){
+      const yr=yU1-60, zc=(zb+D)/2;
+      add({id:`${id}-rod`,node:id,name:`Штанга ${name}`,grp:'Штанга Ø25',mat:'metal',shape:'cyl',x0:xa+2,x1:xb-2,y0:yr-12.5,y1:yr+12.5,z0:zc-12.5,z1:zc+12.5,a:w-4,b:25,t:25,f:[`Длина = проём − 4 = ${f1(w-4)}`,'60 мм от верха проёма']});
+      info.push('штанга');
+    }
+    const dz0=nd>0?yDZ:yF0, zoneW=fr-fl;
+    const dc=s.doors==='auto'?(zoneW>600?2:1):(parseInt(s.doors,10)||0);
+    for(let j=0;j<dc;j++){
+      const dx0=fl+j*zoneW/dc+g/2, dx1=fl+(j+1)*zoneW/dc-g/2, dy0=dz0+g/2, dy1=yFT-g/2;
+      const dH=dy1-dy0, nh=byRule(dH,st.hinge.rules,st.hinge.step);
+      const side=dc===2?(j===0?'L':'R'):(leafN%2===1?'L':'R');
+      const hx=side==='L'?dx0+22.5:dx1-22.5;
+      const did=`${id}-door${j}`, dlabel=dc===2?`Дверь ${name} ${j===0?'левая':'правая'}`:`Дверь ${name}`;
+      const fp=facade(did,dlabel,'Фасад распашной',dx0,dx1,dy0,dy1,[`Петли: ${nh} шт по правилу для высоты ${f1(dH)} мм, сторона ${side==='L'?'левая':'правая'}`]);
+      fp.mov=did; fp.node=id;
+      out.movs.push({id:did,type:'door',px:side==='L'?dx0:dx1,pz:D,sign:side==='L'?-1:1,label:dlabel});
+      spread(dy0,dy1,nh,st.hinge.offset).forEach(y=>out.hw.push({k:'hinge',p:[hx,y,D-2],axis:'z',mov:did}));
+      hingeTotal+=nh;
+      if(dc===1&&dx1-dx0>600) chk.push({lv:'warn',t:`${name}: дверь ${f1(dx1-dx0)} мм шире 600 мм — тяжела для одной створки, лучше две`});
+    }
+    if(dc>0) info.push(dc===2?'две двери':'дверь');
+  };
+  const walk=(node,label,b,f)=>{
+    const split=node.split==='v'||node.split==='h'?node.split:'none';
+    const kids=Array.isArray(node.kids)?node.kids:[];
+    const rec={id:node.id,label,x0:b.x0,x1:b.x1,y0:b.y0,y1:b.y1,leaf:!(split!=='none'&&kids.length>1),split,info:[]};
+    out.nodes.push(rec);
+    const name=label||'корпус';
+    if(rec.leaf){ leaf(node.c||{},rec,label||'С1',b,f); return; }
+    const kl=i=>label?`${label}.${i+1}`:`С${i+1}`;
+    if(split==='v'){
+      const ws=sizes(kids,(b.x1-b.x0)-(kids.length-1)*T,`${name}, деление по ширине`);
+      let x=b.x0;
+      kids.forEach((kid,i)=>{
+        const xa=x, xb=x+ws[i]; x=xb+T;
+        if(ws[i]<100) chk.push({lv:'err',t:`${kl(i)}: ширина ${f1(ws[i])} мм — слишком узко`});
+        walk(kid,kl(i),{x0:xa,x1:xb,y0:b.y0,y1:b.y1},{fx0:i===0?f.fx0:xa-T/2,fx1:i===kids.length-1?f.fx1:xb+T/2,fy0:f.fy0,fy1:f.fy1});
+        if(i<kids.length-1){
+          pn++; const c=xb+T/2, hh=b.y1-b.y0, pid=`${node.id}-p${i}`;
+          add({id:pid,node:node.id,name:`Перегородка ${pn}`,grp:'Перегородка',mat:'ldsp',x0:xb,x1:xb+T,y0:b.y0,y1:b.y1,z0:zb,z1:D,a:hh,b:D-zb,t:T,
+            f:[`Между ${kl(i)} и ${kl(i+1)}`,`Высота = высота проёма = ${f1(hh)}`,`Глубина = Г − ${f1(zb)} (до задней стенки) = ${f1(D-zb)}`]});
+          J(`${pid}-top`,`Перегородка ${pn} — верх`,zb,D,z=>[c,b.y1+T,z],'y');
+          J(`${pid}-bot`,`Перегородка ${pn} — низ`,zb,D,z=>[c,b.y0-T,z],'y');
+        }
+      });
+    } else {
+      const hs=sizes(kids,(b.y1-b.y0)-(kids.length-1)*T,`${name}, деление по высоте`);
+      let y=b.y0;
+      kids.forEach((kid,i)=>{
+        const ya=y, yb=y+hs[i]; y=yb+T;
+        if(hs[i]<100) chk.push({lv:'err',t:`${kl(i)}: высота ${f1(hs[i])} мм — слишком низко`});
+        walk(kid,kl(i),{x0:b.x0,x1:b.x1,y0:ya,y1:yb},{fx0:f.fx0,fx1:f.fx1,fy0:i===0?f.fy0:ya-T/2,fy1:i===kids.length-1?f.fy1:yb+T/2});
+        if(i<kids.length-1){
+          dn++; const yc=yb+T/2, w=b.x1-b.x0, pid=`${node.id}-h${i}`;
+          add({id:pid,node:node.id,name:`Полка-разделитель ${dn}`,grp:'Полка-разделитель',mat:'ldsp',x0:b.x0,x1:b.x1,y0:yb,y1:yb+T,z0:zb,z1:D,a:w,b:D-zb,t:T,
+            f:[`Между ${kl(i)} и ${kl(i+1)}`,`Ширина = ширина проёма = ${f1(w)}`,`Глубина = Г − ${f1(zb)} = ${f1(D-zb)}`,`Высота над полом = ${f1(yb)}`]});
+          J(`${pid}-L`,`Разделитель ${dn} — левая стенка`,zb,D,z=>[b.x0-T,yc,z],'x');
+          J(`${pid}-R`,`Разделитель ${dn} — правая стенка`,zb,D,z=>[b.x1+T,yc,z],'x');
+        }
+      });
+    }
+  };
+  walk(st.root,'',{x0:T,x1:W-T,y0:P+T,y1:H-T},{fx0:0,fx1:W,fy0:P,fy1:H});
+  out.hinges=hingeTotal;
+
+  for(const p of parts){
+    if(p.mat!=='ldsp'&&p.mat!=='hdf') continue;
+    const L=Math.max(p.a,p.b), S=Math.min(p.a,p.b);
+    if(L>SHEET[0]||S>SHEET[1]) chk.push({lv:'err',t:`${p.name}: ${f1(p.a)} × ${f1(p.b)} мм больше листа ${SHEET[0]}×${SHEET[1]}`});
+  }
+  if(!opt.nominal&&Tm>0&&Math.abs(Tm-Tn)>=0.05) chk.push({lv:'info',t:`Детали пересчитаны по фактической толщине ${f1(Tm)} мм (номинал ${Tn} мм)${st.anchor==='inner'?`, ширина изделия стала ${f1(W)} мм`:', габарит сохранён'}`});
+  if(simplified) chk.push({lv:'info',t:`Узкие фасады (${simplified} шт.) сделаны гладкими: рамка филёнки 70 мм на них не помещается`});
+  const order={err:0,warn:1,info:2};
+  chk.sort((a,b)=>order[a.lv]-order[b.lv]);
+  return out;
+}
+
+function matLabel(p,st){
+  if(p.mat==='ldsp') return `ЛДСП ${f1(p.t)}`;
+  if(p.mat==='hdf') return `ХДФ ${f1(p.t)}`;
+  if(p.mat==='facade') return `МДФ ${p.t} · ${st.facade.style==='panel'&&!p.simplified?'филёнка':'гладкий'}`;
+  return 'Металл';
+}
+function specRows(m,st){
+  const map=new Map();
+  for(const p of m.parts){
+    const ml=matLabel(p,st), key=[p.grp,ml,f1(p.a),f1(p.b)].join('|');
+    const e=map.get(key)||{grp:p.grp,mat:ml,kind:p.mat,a:p.a,b:p.b,t:p.t,q:0};
+    e.q++; map.set(key,e);
+  }
+  return [...map.values()].sort((x,y)=>(GROUP_ORDER.indexOf(x.grp)-GROUP_ORDER.indexOf(y.grp))||(y.a-x.a));
+}
+function areas(rows){
+  const a={};
+  rows.forEach(r=>{ if(r.kind==='metal') return; a[r.mat.replace(/ · .*/,'')]=(a[r.mat.replace(/ · .*/,'')]||0)+r.a*r.b*r.q/1e6; });
+  return a;
+}
+function hwRows(m,st){
+  const c={}; m.hw.forEach(h=>{c[h.k]=(c[h.k]||0)+1;});
+  const rows=[];
+  if(c.confirmat) rows.push(['Конфирмат 7×50',c.confirmat]);
+  if(c.minifix){ rows.push(['Эксцентрик 15 мм + шток',c.minifix]); rows.push(['Шкант 8×30',c.minifix]); }
+  if(c.holder) rows.push(['Полкодержатель',c.holder]);
+  if(c.hinge) rows.push(['Петля накладная',c.hinge]);
+  const gl={}; m.guides.forEach(L=>{gl[L]=(gl[L]||0)+1;});
+  Object.keys(gl).sort((a,b)=>a-b).forEach(L=>rows.push([`Направляющие ${L} мм, пара`,gl[L]]));
+  return rows;
+}
+function diffRows(st){
+  const Tm=pnum(st.Ta);
+  if(!(Tm>0)||Math.abs(Tm-st.Tn)<0.05) return null;
+  const a=build(st,{nominal:true}), b=build(st);
+  const bm=new Map(b.parts.map(p=>[p.id,p]));
+  const g=new Map();
+  a.parts.forEach(p=>{
+    const q=bm.get(p.id); if(!q) return;
+    const ch=Math.abs(p.a-q.a)>0.05||Math.abs(p.b-q.b)>0.05||Math.abs(p.t-q.t)>0.05;
+    if(!ch) return;
+    const key=[p.grp,f1(p.a),f1(p.b),f1(q.a),f1(q.b)].join('|');
+    const e=g.get(key)||{grp:p.grp,from:`${f1(p.a)} × ${f1(p.b)} × ${f1(p.t)}`,to:`${f1(q.a)} × ${f1(q.b)} × ${f1(q.t)}`,q:0};
+    e.q++; g.set(key,e);
+  });
+  return {W0:a.W,W1:b.W,rows:[...g.values()]};
+}
+// MODEL-END
+module.exports={build,normState,presetState,BODY_COLORS,FAC_COLORS};
+const M=module.exports;
+
+/* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
+function b64u(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
+async function readState(){
+  const h=location.hash.slice(1);
+  try{
+    if(h[0]==='z'){ const ds=new Blob([b64u(h.slice(1))]).stream().pipeThrough(new DecompressionStream('deflate-raw')); return JSON.parse(await new Response(ds).text()); }
+    if(h[0]==='j') return JSON.parse(new TextDecoder().decode(b64u(h.slice(1))));
+  }catch(e){ console.warn('state',e); }
+  return null;
+}
+function sceneFrom(model,S){
+  const bodyC=(M.BODY_COLORS[S.body]||M.BODY_COLORS.white)[1], facC=(M.FAC_COLORS[(S.facade||{}).color]||M.FAC_COLORS.white)[1];
+  const mat={
+    ldsp:new THREE.MeshStandardMaterial({color:bodyC,roughness:.55}),
+    facade:new THREE.MeshStandardMaterial({color:facC,roughness:.4}),
+    back:new THREE.MeshStandardMaterial({color:new THREE.Color(bodyC).multiplyScalar(.9),roughness:.85}),
+    metal:new THREE.MeshStandardMaterial({color:'#b9bdbf',metalness:.85,roughness:.35}),
+    edge:new THREE.LineBasicMaterial({color:'#5d6661'})};
+  const g=new THREE.Group();
+  for(const p of model.parts){
+    if(p.shape==='cyl'){
+      const len=p.x1-p.x0, m=new THREE.Mesh(new THREE.CylinderGeometry(12.5,12.5,len,20),mat.metal);
+      m.rotation.z=Math.PI/2; m.position.set((p.x0+p.x1)/2,(p.y0+p.y1)/2,(p.z0+p.z1)/2); g.add(m); continue;
+    }
+    const mt=p.facade?mat.facade:(p.grp==='Задняя стенка'?mat.back:(p.mat==='ldsp'?mat.ldsp:mat.back));
+    (p.pieces||[[p.x0,p.x1,p.y0,p.y1,p.z0,p.z1]]).forEach(b=>{
+      const m=new THREE.Mesh(new THREE.BoxGeometry(Math.max(.5,b[1]-b[0]),Math.max(.5,b[3]-b[2]),Math.max(.5,b[5]-b[4])),mt);
+      m.position.set((b[0]+b[1])/2,(b[2]+b[3])/2,(b[4]+b[5])/2); m.name=p.name||p.id; g.add(m);
+      // thin dark edges: on white furniture they are what makes doors, drawers and the plinth readable
+      const e=new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry),mat.edge); e.position.copy(m.position); g.add(e);
+    });
+  }
+  // millimetres → metres, centred on the floor, front of the cabinet facing the viewer
+  const W=model.W||S.W, D=model.D||S.D;
+  g.position.set(-W/2*0.001,0,-D/2*0.001); g.scale.setScalar(0.001);
+  const outer=new THREE.Group(); outer.add(g); return outer;
+}
+function toGLB(obj){
+  return new Promise((res,rej)=>{ try{ new THREE.GLTFExporter().parse(obj,r=>res(new Blob([r],{type:'model/gltf-binary'})),{binary:true}); }catch(e){ rej(e); } });
+}
+(async()=>{
+  let S=await readState(); let ex=false;
+  if(!S){ S=M.presetState('wardrobe'); ex=true; }
+  S=M.normState(Object.assign(M.presetState('wardrobe'),S));
+  const model=M.build(S);
+  const W=S.W,H=S.H,D=S.D;
+  document.getElementById('size').textContent=`${W} × ${H} × ${D} мм`;
+  document.getElementById('name').textContent=ex?'Шкаф · пример':(S.name||'Шкаф');
+  const url=URL.createObjectURL(await toGLB(sceneFrom(model,S)));
+  const mv=document.getElementById('mv'); mv.src=url;
+  document.getElementById('dl').href=url;
+  mv.addEventListener('load',async()=>{
+    const can=mv.canActivateAR;
+    document.getElementById(can?'arBtn':'noAR').hidden=false;
+  });
+  document.getElementById('arBtn').addEventListener('click',()=>mv.activateAR());
+  mv.addEventListener('ar-status',e=>{ if(e.detail.status==='failed'){ const n=document.getElementById('noAR'); n.textContent='Не удалось запустить AR. Проверьте, что установлены «Сервисы Google Play для AR», и откройте ссылку в Chrome.'; n.hidden=false; } });
+})();
+})();
+</script>
+</body>
+</html>
