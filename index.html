@@ -35,6 +35,27 @@ h1{margin:0;font-size:16px;font-weight:600}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);min-height:44px;font-weight:500;font-size:14px}
 .hint{margin:0;color:var(--muted);font-size:13px}
 .diag{margin:0;font-size:12px;color:var(--muted);font-family:var(--f-mono)}
+.mk{display:grid;gap:10px}
+.lead{margin:0;font-size:14px}
+.steps{margin:0;padding-left:20px;display:grid;gap:4px;font-size:14px}
+.steps a{color:var(--accent);font-weight:600}
+.field label{font-size:14px}
+.field input{width:92px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);font:500 16px var(--f-mono);text-align:right}
+.linkbtn{border:0;background:none;color:var(--muted);font:13px var(--f-body);text-decoration:underline;text-underline-offset:3px;padding:4px 0;justify-self:start;cursor:pointer}
+#cam{position:fixed;inset:0;z-index:20;background:#000;overflow:hidden}
+#cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#camGl{transition:opacity .25s}
+#camVideo{position:absolute;width:2px;height:2px;opacity:0;pointer-events:none}
+.cam-top,.cam-bottom{position:absolute;left:0;right:0;display:flex;align-items:center;gap:10px;padding:12px max(14px,env(safe-area-inset-left,0px))}
+.cam-top{top:env(safe-area-inset-top,0px);justify-content:space-between}
+.cam-bottom{bottom:env(safe-area-inset-bottom,0px);justify-content:space-between;flex-wrap:wrap}
+.cam-status,.cam-shift,.cam-x,.cam-shot{background:rgba(12,18,15,.72);color:#fff;border:0;border-radius:12px;font:500 14px var(--f-body);backdrop-filter:blur(6px)}
+.cam-status{padding:9px 13px;min-width:0}
+.cam-x{width:44px;height:44px;font-size:18px;flex:none;cursor:pointer}
+.cam-shift{display:flex;align-items:center;gap:4px;padding:3px}
+.cam-shift button{width:44px;height:44px;border:0;border-radius:10px;background:rgba(255,255,255,.14);color:#fff;font-size:20px;cursor:pointer}
+.cam-shift span{padding:0 8px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cam-shot{padding:0 18px;height:50px;background:#fff;color:#111;font-weight:600;font-size:15px;cursor:pointer}
 .note{margin:0;padding:10px 12px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:13px}
 model-viewer [slot="ar-button"]{display:none}
 #arPrompt{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);padding:10px 14px;border-radius:12px;background:rgba(0,0,0,.6);color:#fff;font-size:14px;white-space:nowrap}
@@ -50,10 +71,31 @@ model-viewer [slot="ar-button"]{display:none}
 <div class="sheet">
   <div class="row"><h1 id="name">Шкаф</h1><span class="size" id="size">—</span></div>
   <button class="btn" id="arBtn" type="button" hidden>Поставить в комнате</button>
-  <p class="note" id="noAR" hidden>Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.</p>
-  <p class="diag mono" id="diag">Проверяю поддержку AR…</p>
-  <p class="hint" id="tip">Масштаб 1:1 зафиксирован: шкаф встанет в реальном размере. Пальцем можно повернуть и передвинуть.</p>
+  <p class="hint" id="tip" hidden>Масштаб 1:1 зафиксирован: шкаф встанет в реальном размере. Пальцем можно повернуть и передвинуть.</p>
+  <div id="mk" class="mk" hidden>
+    <p class="lead">На этом телефоне шкаф ставится по листу-метке. Размер получается точным, потому что размер листа известен.</p>
+    <ol class="steps">
+      <li>Распечатайте <a href="marker.pdf" target="_blank" rel="noopener">лист-метку</a> в масштабе 100&nbsp;%.</li>
+      <li>Положите лист на пол верхним краем к стене. Здесь встанет середина шкафа.</li>
+      <li>Включите камеру и наведите её на лист.</li>
+    </ol>
+    <div class="row field"><label for="mkSize">Сторона чёрного квадрата, мм</label><input id="mkSize" type="number" inputmode="numeric" min="40" max="1000" step="1" value="170"></div>
+    <p class="hint">На листе А4 это 170 мм, на А3 — 240 мм. Измерьте линейкой: от этого числа зависит точность размера шкафа.</p>
+    <button class="btn" id="mkStart" type="button">Включить камеру</button>
+    <p class="note" id="mkErr" hidden></p>
+    <button class="linkbtn" id="mkRetry" type="button" hidden>Попробовать встроенный AR ещё раз</button>
+  </div>
+  <p class="diag mono" id="diag" hidden></p>
   <a class="btn ghost" id="dl" download="shkaf.glb">Скачать модель (GLB)</a>
+</div>
+<div id="cam" hidden>
+  <video id="camVideo" playsinline muted autoplay></video>
+  <canvas id="camBg"></canvas><canvas id="camGl"></canvas>
+  <div class="cam-top"><span class="cam-status" id="camStatus" role="status">Наведите камеру на лист</span><button type="button" class="cam-x" id="camClose" aria-label="Закрыть камеру">✕</button></div>
+  <div class="cam-bottom">
+    <div class="cam-shift"><button type="button" id="shL" aria-label="Сдвинуть шкаф влево">←</button><span id="shVal">по центру листа</span><button type="button" id="shR" aria-label="Сдвинуть шкаф вправо">→</button></div>
+    <button type="button" class="cam-shot" id="camShot">Снимок</button>
+  </div>
 </div>
 <script>
 (function(){
@@ -491,6 +533,208 @@ function diffRows(st){
 // MODEL-END
 module.exports={build,normState,presetState,BODY_COLORS,FAC_COLORS};
 const M=module.exports;
+/* EasyCab marker tracking: finds the printed sheet in a camera frame and returns where the camera is.
+   The sheet lies on the floor. Marker frame: origin at the centre of the black square, X to the right,
+   Y towards the wall (the "top" of the printed sheet), Z up from the paper. Units: metres.
+   Camera frame is the usual computer-vision one: x right, y down, z forward. */
+(function(root){
+'use strict';
+const T={};
+T.CODE='0001000100111110';   // 4×4 bits, row by row from the top, 1 = white; 10 bits away from its own rotations
+T.DICT='EASYCAB';
+
+/* ---------- small linear algebra ---------- */
+function solve(A,b){
+  const n=b.length, M=A.map((r,i)=>r.concat([b[i]]));
+  for(let c=0;c<n;c++){
+    let p=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[p][c])) p=r;
+    if(Math.abs(M[p][c])<1e-12) return null;
+    const t=M[c]; M[c]=M[p]; M[p]=t;
+    for(let r=0;r<n;r++){ if(r===c) continue; const k=M[r][c]/M[c][c]; if(k) for(let j=c;j<=n;j++) M[r][j]-=k*M[c][j]; }
+  }
+  return M.map((r,i)=>r[n]/r[i]);
+}
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{ const l=Math.hypot(a[0],a[1],a[2])||1; return [a[0]/l,a[1]/l,a[2]/l]; };
+const add=(a,b,k)=>[a[0]+b[0]*k,a[1]+b[1]*k,a[2]+b[2]*k];
+// R is row-major 3×3
+const col=(R,j)=>[R[j],R[3+j],R[6+j]];
+const fromCols=(a,b,c)=>[a[0],b[0],c[0],a[1],b[1],c[1],a[2],b[2],c[2]];
+const mul=(A,B)=>{ const C=new Array(9); for(let i=0;i<3;i++) for(let j=0;j<3;j++) C[i*3+j]=A[i*3]*B[j]+A[i*3+1]*B[3+j]+A[i*3+2]*B[6+j]; return C; };
+function rodrigues(w){
+  const th=Math.hypot(w[0],w[1],w[2]); if(th<1e-12) return [1,0,0,0,1,0,0,0,1];
+  const k=[w[0]/th,w[1]/th,w[2]/th], c=Math.cos(th), s=Math.sin(th), v=1-c;
+  return [c+k[0]*k[0]*v, k[0]*k[1]*v-k[2]*s, k[0]*k[2]*v+k[1]*s,
+          k[1]*k[0]*v+k[2]*s, c+k[1]*k[1]*v, k[1]*k[2]*v-k[0]*s,
+          k[2]*k[0]*v-k[1]*s, k[2]*k[1]*v+k[0]*s, c+k[2]*k[2]*v];
+}
+
+/* ---------- geometry ---------- */
+// corners of the black square in the marker frame, in the order the detector reports them: TL, TR, BR, BL
+T.corners3=s=>[[-s/2,s/2],[s/2,s/2],[s/2,-s/2],[-s/2,-s/2]];
+
+// plane → image homography from 4 point pairs, row-major, h33 = 1
+T.homography=function(src,dst){
+  const A=[],b=[];
+  for(let i=0;i<4;i++){
+    const X=src[i][0],Y=src[i][1],u=dst[i][0],v=dst[i][1];
+    A.push([X,Y,1,0,0,0,-u*X,-u*Y]); b.push(u);
+    A.push([0,0,0,X,Y,1,-v*X,-v*Y]); b.push(v);
+  }
+  const h=solve(A,b); return h?h.concat([1]):null;
+};
+
+/* Focal length straight from the picture: the two sides of the square are equally long and at a right angle,
+   which gives two equations for f once the sheet is seen at a slant. Returns {f, strength} or null. */
+T.focalFromH=function(H,s){
+  const h1=[H[0],H[3],H[6]], h2=[H[1],H[4],H[7]];
+  const a1=h1[0]*h2[0]+h1[1]*h2[1], b1=h1[2]*h2[2];
+  const a2=h1[0]*h1[0]+h1[1]*h1[1]-h2[0]*h2[0]-h2[1]*h2[1], b2=h1[2]*h1[2]-h2[2]*h2[2];
+  const den=a1*a1+a2*a2; if(den<1e-9) return null;
+  const w=-(a1*b1+a2*b2)/den; if(!(w>0)) return null;
+  return {f:1/Math.sqrt(w), strength:s*Math.hypot(h1[2],h2[2])};
+};
+
+function project(R,t,f,X,Y){
+  const x=R[0]*X+R[1]*Y+t[0], y=R[3]*X+R[4]*Y+t[1], z=R[6]*X+R[7]*Y+t[2];
+  return [f*x/z,f*y/z,z];
+}
+T.reprojError=function(R,t,f,pts3,pts2){
+  let e=0; for(let i=0;i<pts3.length;i++){ const p=project(R,t,f,pts3[i][0],pts3[i][1]); if(!(p[2]>0)) return 1e9; e+=(p[0]-pts2[i][0])**2+(p[1]-pts2[i][1])**2; }
+  return Math.sqrt(e/pts3.length);
+};
+
+// first guess of the pose from the homography
+T.poseFromH=function(H,f){
+  let r1=[H[0]/f,H[3]/f,H[6]], r2=[H[1]/f,H[4]/f,H[7]], t=[H[2]/f,H[5]/f,H[8]];
+  let k=2/(Math.hypot(...r1)+Math.hypot(...r2)); if(t[2]<0) k=-k;
+  t=[t[0]*k,t[1]*k,t[2]*k];
+  const a=norm(r1.map(v=>v*k)), b=norm(r2.map(v=>v*k));
+  // nearest pair of perpendicular unit vectors to a and b
+  const c=norm(add(a,b,1)), n=norm(cross(a,b)), d=norm(cross(n,c));
+  const x=norm(add(c,d,-1)), y=norm(add(c,d,1));
+  return {R:fromCols(x,y,cross(x,y)),t};
+};
+
+// a few Gauss–Newton steps on the reprojection error
+T.refinePose=function(R,t,f,pts3,pts2,iters){
+  const res=(R,t)=>{ const r=[]; for(let i=0;i<pts3.length;i++){ const p=project(R,t,f,pts3[i][0],pts3[i][1]); r.push(p[0]-pts2[i][0],p[1]-pts2[i][1]); } return r; };
+  const apply=(R,t,d)=>({R:mul(rodrigues([d[0],d[1],d[2]]),R),t:[t[0]+d[3],t[1]+d[4],t[2]+d[5]]});
+  for(let it=0;it<(iters||6);it++){
+    const r0=res(R,t), J=[], eps=[1e-5,1e-5,1e-5,1e-5,1e-5,1e-5];
+    for(let k=0;k<6;k++){ const d=[0,0,0,0,0,0]; d[k]=eps[k]; const q=apply(R,t,d), rk=res(q.R,q.t); J.push(rk.map((v,i)=>(v-r0[i])/eps[k])); }
+    const A=[],g=[];
+    for(let i=0;i<6;i++){ A.push([]); for(let j=0;j<6;j++){ let s=0; for(let m=0;m<r0.length;m++) s+=J[i][m]*J[j][m]; A[i][j]=s+(i===j?1e-9*(1+s):0); } let s=0; for(let m=0;m<r0.length;m++) s+=J[i][m]*r0[m]; g.push(-s); }
+    const d=solve(A,g); if(!d) break;
+    const q=apply(R,t,d); if(!(q.t[2]>0)) break;
+    R=q.R; t=q.t;
+    if(Math.hypot(...d)<1e-9) break;
+  }
+  return {R,t};
+};
+
+/* A flat square far away can be read as tilted towards the camera or away from it. Both readings are refined and
+   the one whose "up" agrees with the picture's up (the sheet is on the floor, the phone is held upright) wins. */
+T.solvePose=function(pts2,s,f,up,prev){
+  const pts3=T.corners3(s), H=T.homography(pts3,pts2); if(!H) return null;
+  up=up||[0,-1,0];
+  const p0=T.poseFromH(H,f), cands=[];
+  const A=T.refinePose(p0.R,p0.t,f,pts3,pts2,8); cands.push(A);
+  const v=norm(A.t), Rv=rodrigues([v[0]*Math.PI,v[1]*Math.PI,v[2]*Math.PI]);
+  const flip=mul(mul(Rv,A.R),[-1,0,0,0,-1,0,0,0,1]);
+  cands.push(T.refinePose(flip,A.t,f,pts3,pts2,8));
+  let best=null;
+  for(const c of cands){
+    c.err=T.reprojError(c.R,c.t,f,pts3,pts2); c.n=col(c.R,2); c.up=dot(c.n,up);
+    // cost: reprojection error, plus a penalty for a floor that faces down, plus a small one for jumping away from the last pose
+    c.cost=c.err+(c.up<0.08?50:0)+(prev?3*(1-Math.max(0,dot(c.n,col(prev.R,2)))):0);
+    if(!best||c.cost<best.cost) best=c;
+  }
+  best.H=H; return best;
+};
+
+/* ---------- corner refinement ----------
+   The detector gives corners to the nearest pixel. Each side of the square is re-measured at many points
+   (position of the strongest dark/light step across the edge), a straight line is fitted, and the corners
+   are the crossings of those lines. This is what keeps a tall cabinet from wobbling. */
+T.refineCorners=function(g,w,h,c){
+  const px=(x,y)=>{ x=x<0?0:x>w-1.001?w-1.001:x; y=y<0?0:y>h-1.001?h-1.001:y; const x0=x|0,y0=y|0,fx=x-x0,fy=y-y0,i=y0*w+x0;
+    return (g[i]*(1-fx)+g[i+1]*fx)*(1-fy)+(g[i+w]*(1-fx)+g[i+w+1]*fx)*fy; };
+  const lines=[];
+  for(let i=0;i<4;i++){
+    const a=c[i], b=c[(i+1)%4], dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy); if(len<8) return c;
+    const ux=dx/len, uy=dy/len, nx=-uy, ny=ux, n=Math.max(8,Math.min(48,len/2|0)), R=3, pts=[];
+    for(let k=0;k<n;k++){
+      const s=0.14+0.72*(k+0.5)/n, bx=a.x+dx*s, by=a.y+dy*s;
+      let bi=0,bg=0; const gr=[];
+      for(let o=-R;o<=R;o++){ const gv=Math.abs(px(bx+nx*(o+1),by+ny*(o+1))-px(bx+nx*(o-1),by+ny*(o-1))); gr.push(gv); if(gv>bg){bg=gv;bi=o+R;} }
+      if(bg<10||bi===0||bi===gr.length-1) continue;
+      const y0=gr[bi-1],y1=gr[bi],y2=gr[bi+1], den=y0-2*y1+y2, off=(bi-R)+(den?0.5*(y0-y2)/den:0);
+      pts.push([bx+nx*off,by+ny*off]);
+    }
+    if(pts.length<4) return c;
+    // total least squares line through pts
+    let mx=0,my=0; for(const p of pts){mx+=p[0];my+=p[1];} mx/=pts.length; my/=pts.length;
+    let sxx=0,sxy=0,syy=0; for(const p of pts){ const x=p[0]-mx,y=p[1]-my; sxx+=x*x; sxy+=x*y; syy+=y*y; }
+    const th=0.5*Math.atan2(2*sxy,sxx-syy);
+    lines.push({x:mx,y:my,dx:Math.cos(th),dy:Math.sin(th)});
+  }
+  const out=[];
+  for(let i=0;i<4;i++){
+    const l1=lines[(i+3)%4], l2=lines[i], den=l1.dx*l2.dy-l1.dy*l2.dx; if(Math.abs(den)<1e-6) return c;
+    const t=((l2.x-l1.x)*l2.dy-(l2.y-l1.y)*l2.dx)/den, x=l1.x+l1.dx*t, y=l1.y+l1.dy*t;
+    if(Math.hypot(x-c[i].x,y-c[i].y)>4) return c;
+    out.push({x,y});
+  }
+  return out;
+};
+
+/* ---------- tracker ---------- */
+T.Tracker=function(AR){
+  if(!AR.DICTIONARIES[T.DICT]) AR.DICTIONARIES[T.DICT]={nBits:16,tau:3,codeList:[parseInt(T.CODE,2)]};
+  this.det=new AR.Detector({dictionaryName:T.DICT});
+  this.fList=[]; this.f=0; this.prev=null;
+};
+// img: ImageData of the frame or of a cut-out of it; scale = img px per full-frame px; ox,oy = where the cut-out starts
+// in the full frame; W,H = full frame size in px
+T.Tracker.prototype.process=function(img,scale,W,H,size,up,ox,oy){
+  ox=ox||0; oy=oy||0;
+  const ms=this.det.detect(img);
+  if(!ms.length){ return null; }
+  let m=ms[0]; for(const k of ms) if(k.hammingDistance<m.hammingDistance) m=k;
+  const g=this.det.grey, rc=T.refineCorners(g.data,g.width,g.height,m.corners);
+  const pts2=rc.map(p=>[(p.x+0.5)/scale+ox-W/2,(p.y+0.5)/scale+oy-H/2]);
+  const long=Math.max(W,H);
+  if(!this.f) this.f=0.75*long;
+  const H0=T.homography(T.corners3(size),pts2); if(!H0) return null;
+  const fe=T.focalFromH(H0,size);
+  const per=rc.reduce((a,p,i)=>a+Math.hypot(p.x-rc[(i+1)%4].x,p.y-rc[(i+1)%4].y),0)/scale;
+  // trust the picture's own focal length only when the sheet is big in the frame and clearly slanted
+  if(fe&&fe.strength>0.04&&per>0.085*long&&fe.f>0.45*long&&fe.f<1.6*long){
+    this.fList.push(fe.f); if(this.fList.length>61) this.fList.shift();
+    if(this.fList.length>=4){
+      const s=this.fList.slice().sort((a,b)=>a-b), med=s[s.length>>1];
+      // the first trusted value replaces the guess at once, later ones only nudge it
+      this.f=this.fSet?this.f+(med-this.f)*0.15:med; this.fSet=true;
+    }
+  }
+  const pose=T.solvePose(pts2,size,this.f,up,this.prev); if(!pose) return null;
+  this.prev=pose;
+  return {fe:fe,R:pose.R,t:pose.t,err:pose.err,f:this.f,fKnown:!!this.fSet,corners:rc.map(p=>({x:p.x/scale+ox,y:p.y/scale+oy})),per};
+};
+// marker → three.js camera space (y up, looking down −z), column-major 4×4
+T.toThree=function(R,t){ return [R[0],-R[3],-R[6],0, R[1],-R[4],-R[7],0, R[2],-R[5],-R[8],0, t[0],-t[1],-t[2],1]; };
+
+// the printed square as SVG cells (6×6 with the black frame), 1 unit per cell
+T.markerCells=function(){
+  const out=[]; for(let i=0;i<4;i++) for(let j=0;j<4;j++) if(T.CODE[i*4+j]==='1') out.push([j+1,i+1]); return out;
+};
+T._={solve,rodrigues,mul,col,project};
+root.EC_TRACK=T;
+if(typeof module!=='undefined') module.exports=T;
+})(typeof window!=='undefined'?window:globalThis);
+
 
 /* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
 function b64u(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
@@ -547,31 +791,161 @@ function toGLB(obj){
   const fileUrl=ex?new URL('example.glb',location.href).href:blobUrl;
   const mv=document.getElementById('mv'); mv.src=fileUrl;
   document.getElementById('dl').href=blobUrl;
-  const diag=document.getElementById('diag'), note=document.getElementById('noAR'), btn=document.getElementById('arBtn');
+  const $=id=>document.getElementById(id);
+  const diag=$('diag'), btn=$('arBtn'), tip=$('tip'), mk=$('mk');
+  const debug=/[?&]debug/.test(location.search);
   let xr=false;
   try{ xr=!!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-ar')); }catch(e){}
   const modes=xr?'webxr scene-viewer quick-look':(ex?'scene-viewer quick-look':'quick-look');
   mv.setAttribute('ar-modes',modes);
-  const line=()=>`WebXR в браузере: ${xr?'есть':'нет'} · Scene Viewer: ${ex?'доступен для примера':'только для примера'}`;
-  diag.textContent=line();
-  mv.addEventListener('load',()=>{
-    if(mv.canActivateAR) btn.hidden=false;
-    else { note.textContent=ex?'Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.'
-      :'Chrome на этом телефоне не даёт браузерный AR (WebXR). Пример шкафа можно поставить через Google Scene Viewer — откройте страницу без параметров.'; note.hidden=false; }
-  });
+  const line=()=>`WebXR: ${xr?'есть':'нет'} · Scene Viewer: ${ex?'пример':'нет'}`;
+  if(debug){ diag.hidden=false; diag.textContent=line(); }
+
+  /* Which way to put the cabinet in the room. A phone with working built-in AR gets only that.
+     A phone without it (or where it shut at once) gets the printed-sheet mode, and remembers it. */
+  let noAR=false; try{ noAR=localStorage.getItem('ecNoAR')==='1'; }catch(e){}
+  function builtin(){ btn.hidden=false; tip.hidden=false; mk.hidden=true; }
+  function sheetMode(remember){
+    btn.hidden=true; tip.hidden=true; mk.hidden=false; $('mkRetry').hidden=!mv.canActivateAR;
+    if(remember) try{ localStorage.setItem('ecNoAR','1'); }catch(e){}
+  }
+  mv.addEventListener('load',()=>{ if(mv.canActivateAR&&!noAR) builtin(); else sheetMode(false); });
+  $('mkRetry').addEventListener('click',()=>{ try{ localStorage.removeItem('ecNoAR'); }catch(e){} builtin(); });
   let tClick=0, started=false;
-  btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; note.hidden=true; mv.activateAR(); });
+  btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; mv.activateAR(); });
   mv.addEventListener('ar-status',e=>{
     const st=e.detail.status;
-    diag.textContent=line()+' · запуск: '+({'session-started':'идёт','object-placed':'шкаф поставлен','not-presenting':'закрыт','failed':'ошибка'}[st]||st);
+    if(debug) diag.textContent=line()+' · '+st;
     if(st==='session-started'||st==='object-placed') started=true;
-    // AR opened and shut at once without ever starting: the phone has no working Google AR services
-    if(st==='not-presenting'&&!started&&Date.now()-tClick<4000){
-      note.textContent='AR на этом телефоне не запустился: нет «Сервисов Google Play для AR». Если Play Маркет их не находит, модель телефона пока не поддерживается Google. Откройте эту же ссылку на другом телефоне.';
-      note.hidden=false;
-    }
-    if(st==='failed'){ note.textContent='AR не запустился. Проверьте в Play Маркете, что установлены «Сервисы Google Play для AR», разрешите Chrome доступ к камере и попробуйте ещё раз.'; note.hidden=false; }
+    // opened and shut at once without ever starting, or failed outright: no working AR services on this phone
+    if(st==='failed'||(st==='not-presenting'&&!started&&Date.now()-tClick<4000)) sheetMode(true);
   });
+  // the separate Google viewer bounces straight back when the phone has no AR services
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&tClick&&!started&&Date.now()-tClick<2500&&!btn.hidden) sheetMode(true); });
+
+  /* ---------- sheet mode: camera picture with the cabinet standing on the printed sheet ---------- */
+  const K_WALL=105/170;            // from the centre of the square to the sheet's wall edge, in square sides
+  const loadScript=src=>new Promise((res,rej)=>{ const el=document.createElement('script'); el.src=src; el.onload=res; el.onerror=()=>rej(new Error(src)); document.head.appendChild(el); });
+  let run=null;
+  async function startSheet(opts){
+    opts=opts||{};
+    const err=$('mkErr'); err.hidden=true;
+    const size=Math.min(1000,Math.max(40,parseFloat($('mkSize').value)||170))/1000;
+    try{ localStorage.setItem('ecMkSize',String(Math.round(size*1000))); }catch(e){}
+    try{
+      if(!window.AR){ await loadScript('https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/cv.js'); await loadScript('https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js'); }
+    }catch(e){ err.textContent='Не удалось загрузить модуль распознавания. Проверьте интернет и попробуйте ещё раз.'; err.hidden=false; return; }
+    const video=$('camVideo'); let stream=null, src=opts.source||null;
+    if(!src){
+      try{ stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}}); }
+      catch(e){ err.textContent='Нет доступа к камере. Разрешите камеру для этого сайта в настройках браузера и нажмите кнопку ещё раз.'; err.hidden=false; return; }
+      video.srcObject=stream; try{ await video.play(); }catch(e){}
+      for(let i=0;i<60&&!video.videoWidth;i++) await new Promise(r=>setTimeout(r,50));
+      if(!video.videoWidth){ stream.getTracks().forEach(t=>t.stop()); err.textContent='Камера не отдаёт изображение. Закройте другие приложения с камерой и попробуйте ещё раз.'; err.hidden=false; return; }
+      src=video;
+    }
+    const dims=()=>src===video?[video.videoWidth,video.videoHeight]:[src.width,src.height];
+    let [W,H]=dims();
+    const cam=$('cam'), bg=$('camBg'), gl=$('camGl'), status=$('camStatus'), bctx=bg.getContext('2d');
+    cam.hidden=false; gl.style.opacity=0;
+    const renderer=new THREE.WebGLRenderer({canvas:gl,alpha:true,antialias:true,preserveDrawingBuffer:true});
+    renderer.setPixelRatio(1); renderer.setClearColor(0x000000,0);
+    const scene=new THREE.Scene(), camera=new THREE.Camera();
+    const root=new THREE.Group(); root.matrixAutoUpdate=false; scene.add(root);
+    const fit=new THREE.Group(); fit.rotation.x=Math.PI/2; root.add(fit);
+    fit.add(sceneFrom(model,S));
+    const Wm=S.W/1000, Dm=S.D/1000;
+    const shadow=new THREE.Mesh(new THREE.PlaneGeometry(Wm+0.16,Dm+0.2),new THREE.MeshBasicMaterial({color:0x000000,transparent:true,opacity:.2,depthWrite:false}));
+    shadow.rotation.x=-Math.PI/2; shadow.position.y=0.002; fit.add(shadow);
+    scene.add(new THREE.AmbientLight(0xffffff,.78));
+    const sun=new THREE.DirectionalLight(0xffffff,.55); sun.position.set(-1.5,-3,4); root.add(sun); root.add(sun.target);
+    const tracker=new EC_TRACK.Tracker(window.AR), dcan=document.createElement('canvas'), dctx=dcan.getContext('2d',{willReadFrequently:true});
+    let detLong=1280, avg=0, shift=0, lastSeen=0, seenOnce=false, fProj=0, raf=0, stopped=false, last=null;
+    const pos=new THREE.Vector3(), quat=new THREE.Quaternion(), tp=new THREE.Vector3(), tq=new THREE.Quaternion(), ts=new THREE.Vector3(), tm=new THREE.Matrix4();
+    function layout(){
+      bg.width=W; bg.height=H; renderer.setSize(W,H,false); fProj=0;
+    }
+    function setProjection(f){
+      const n=0.05, fr=60;
+      camera.projectionMatrix.set(2*f/W,0,0,0, 0,2*f/H,0,0, 0,0,-(fr+n)/(fr-n),-2*fr*n/(fr-n), 0,0,-1,0);
+      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert(); fProj=f;
+    }
+    function place(){ fit.position.set(shift,K_WALL*size-Dm/2,0); }
+    function shiftText(){ const cm=Math.round(Math.abs(shift)*100); $('shVal').textContent=cm?`${shift<0?'влево':'вправо'} ${cm} см`:'по центру листа'; }
+    layout(); place(); shiftText();
+    function frame(){
+      if(stopped) return;
+      raf=requestAnimationFrame(frame);
+      if(src===video&&video.readyState<2) return;
+      const d=dims(); if(d[0]!==W||d[1]!==H){ W=d[0]; H=d[1]; layout(); }
+      bctx.drawImage(src,0,0,W,H);
+      const t0=performance.now(); let r=null, dw=0, dh=0;
+      const grab=(x,y,w,h,sc)=>{
+        dw=Math.max(8,Math.round(w*sc)); dh=Math.max(8,Math.round(h*sc));
+        if(dcan.width!==dw||dcan.height!==dh){ dcan.width=dw; dcan.height=dh; }
+        dctx.drawImage(bg,x,y,w,h,0,0,dw,dh);
+        try{ return tracker.process(dctx.getImageData(0,0,dw,dh),dw/w,W,H,size,null,x,y); }catch(e){ if(debug) console.warn(e); return null; }
+      };
+      // the sheet was just seen: look only around that spot, at full sharpness — faster and steadier than the whole frame
+      if(last&&performance.now()-lastSeen<400){
+        const xs=last.corners.map(p=>p.x), ys=last.corners.map(p=>p.y);
+        const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys), pad=Math.max(90,0.9*Math.max(x1-x0,y1-y0));
+        const rx=Math.max(0,Math.floor(x0-pad)), ry=Math.max(0,Math.floor(y0-pad)), rw=Math.min(W,Math.ceil(x1+pad))-rx, rh=Math.min(H,Math.ceil(y1+pad))-ry;
+        if(rw>40&&rh>40) r=grab(rx,ry,rw,rh,Math.min(1,1100/Math.max(rw,rh)));
+      }
+      if(!r){
+        r=grab(0,0,W,H,Math.min(1,detLong/Math.max(W,H)));
+        const dt=performance.now()-t0; avg=avg?avg*0.85+dt*0.15:dt;
+        // spend spare speed on sharpness: a far sheet is only a few dozen pixels wide
+        if(avg<45&&detLong<Math.max(W,H)) detLong=Math.min(Math.max(W,H),detLong+320); else if(avg>110&&detLong>960) detLong-=160;
+      }
+      const now=performance.now();
+      if(r){
+        if(Math.abs(r.f-fProj)>0.5) setProjection(r.f);
+        tm.fromArray(EC_TRACK.toThree(r.R,r.t)); tm.decompose(tp,tq,ts);
+        const jump=!seenOnce||now-lastSeen>700||tp.distanceTo(pos)>0.3||quat.angleTo(tq)>0.4;
+        if(jump){ pos.copy(tp); quat.copy(tq); }
+        else {
+          // steady hand → heavy smoothing, real movement → follow quickly
+          const mo=tp.distanceTo(pos)/Math.max(0.5,tp.length())+quat.angleTo(tq), a=Math.min(0.6,0.1+mo*9);
+          pos.lerp(tp,a); quat.slerp(tq,a);
+        }
+        root.matrix.compose(pos,quat,ts.set(1,1,1)); root.matrixWorldNeedsUpdate=true;
+        lastSeen=now; seenOnce=true; last=r;
+      }
+      const fresh=seenOnce&&now-lastSeen<700;
+      gl.style.opacity=seenOnce?(fresh?1:0.35):0;
+      let msg;
+      if(!seenOnce) msg='Наведите камеру на лист';
+      else if(!fresh) msg='Лист потерян — верните его в кадр';
+      else { const dist=last?Math.hypot(last.t[0],last.t[1],last.t[2]):0; msg=(last&&last.per<0.09*Math.max(W,H))?'Лист далеко: подойдите ближе или распечатайте его на А3':`Лист найден · до него ${dist.toFixed(1).replace('.',',')} м`; }
+      if(status.textContent!==msg) status.textContent=msg;
+      if(debug&&last) diag.textContent=`${W}×${H} · det ${dw}×${dh} ${avg.toFixed(0)} мс · f ${last.f.toFixed(0)}${last.fKnown?'':' (по умолч.)'} · err ${last.err.toFixed(2)}`;
+      if(seenOnce) renderer.render(scene,camera);
+    }
+    const onL=()=>{ shift-=0.05; place(); shiftText(); }, onR=()=>{ shift+=0.05; place(); shiftText(); };
+    const onShot=()=>{
+      const c=document.createElement('canvas'); c.width=W; c.height=H; const x=c.getContext('2d'); x.drawImage(bg,0,0); if(seenOnce) x.drawImage(gl,0,0,W,H);
+      c.toBlob(async b=>{
+        if(!b) return; const file=new File([b],'shkaf-v-komnate.jpg',{type:'image/jpeg'});
+        try{ if(navigator.canShare&&navigator.canShare({files:[file]})){ await navigator.share({files:[file],title:'Шкаф в комнате'}); return; } }catch(e){ if(e&&e.name==='AbortError') return; }
+        const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download=file.name; document.body.appendChild(a); a.click(); a.remove();
+      },'image/jpeg',0.92);
+    };
+    const stop=()=>{
+      stopped=true; cancelAnimationFrame(raf); if(stream) stream.getTracks().forEach(t=>t.stop()); video.srcObject=null;
+      $('shL').removeEventListener('click',onL); $('shR').removeEventListener('click',onR); $('camShot').removeEventListener('click',onShot); $('camClose').removeEventListener('click',stop);
+      renderer.dispose(); cam.hidden=true; run=null;
+    };
+    $('shL').addEventListener('click',onL); $('shR').addEventListener('click',onR); $('camShot').addEventListener('click',onShot); $('camClose').addEventListener('click',stop);
+    run={stop,get last(){return last;},get seen(){return seenOnce;}};
+    try{ if(navigator.wakeLock) navigator.wakeLock.request('screen').catch(()=>{}); }catch(e){}
+    frame();
+    return run;
+  }
+  try{ const v=parseInt(localStorage.getItem('ecMkSize'),10); if(v>=40&&v<=1000) $('mkSize').value=v; }catch(e){}
+  $('mkStart').addEventListener('click',()=>startSheet());
+  window.__ecSheet={start:startSheet,sheetMode,get run(){return run;}};
 })();
 })();
 </script>
