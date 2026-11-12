@@ -34,6 +34,7 @@ h1{margin:0;font-size:16px;font-weight:600}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:50px;border-radius:12px;border:0;background:var(--accent);color:var(--accent-ink);font:600 16px var(--f-body);width:100%;cursor:pointer;text-decoration:none}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);min-height:44px;font-weight:500;font-size:14px}
 .hint{margin:0;color:var(--muted);font-size:13px}
+.diag{margin:0;font-size:12px;color:var(--muted);font-family:var(--f-mono)}
 .note{margin:0;padding:10px 12px;border-radius:10px;background:var(--warn-soft);color:var(--warn);font-size:13px}
 model-viewer [slot="ar-button"]{display:none}
 #arPrompt{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);padding:10px 14px;border-radius:12px;background:rgba(0,0,0,.6);color:#fff;font-size:14px;white-space:nowrap}
@@ -50,6 +51,7 @@ model-viewer [slot="ar-button"]{display:none}
   <div class="row"><h1 id="name">Шкаф</h1><span class="size" id="size">—</span></div>
   <button class="btn" id="arBtn" type="button" hidden>Поставить в комнате</button>
   <p class="note" id="noAR" hidden>Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.</p>
+  <p class="diag mono" id="diag">Проверяю поддержку AR…</p>
   <p class="hint" id="tip">Масштаб 1:1 зафиксирован: шкаф встанет в реальном размере. Пальцем можно повернуть и передвинуть.</p>
   <a class="btn ghost" id="dl" download="shkaf.glb">Скачать модель (GLB)</a>
 </div>
@@ -538,15 +540,31 @@ function toGLB(obj){
   const W=S.W,H=S.H,D=S.D;
   document.getElementById('size').textContent=`${W} × ${H} × ${D} мм`;
   document.getElementById('name').textContent=ex?'Шкаф · пример':(S.name||'Шкаф');
-  const url=URL.createObjectURL(await toGLB(sceneFrom(model,S)));
-  const mv=document.getElementById('mv'); mv.src=url;
-  document.getElementById('dl').href=url;
-  mv.addEventListener('load',async()=>{
-    const can=mv.canActivateAR;
-    document.getElementById(can?'arBtn':'noAR').hidden=false;
+  const blob=await toGLB(sceneFrom(model,S));
+  const blobUrl=URL.createObjectURL(blob);
+  // Google Scene Viewer is a separate app and can only open a file by a real https address, not a page-made model.
+  // The example wardrobe is published next to the page, so it works there; a cabinet from a link needs WebXR in Chrome.
+  const fileUrl=ex?new URL('example.glb',location.href).href:blobUrl;
+  const mv=document.getElementById('mv'); mv.src=fileUrl;
+  document.getElementById('dl').href=blobUrl;
+  const diag=document.getElementById('diag'), note=document.getElementById('noAR'), btn=document.getElementById('arBtn');
+  let xr=false;
+  try{ xr=!!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-ar')); }catch(e){}
+  const modes=xr?'webxr scene-viewer quick-look':(ex?'scene-viewer quick-look':'quick-look');
+  mv.setAttribute('ar-modes',modes);
+  const line=()=>`WebXR в браузере: ${xr?'есть':'нет'} · Scene Viewer: ${ex?'доступен для примера':'только для примера'}`;
+  diag.textContent=line();
+  mv.addEventListener('load',()=>{
+    if(mv.canActivateAR) btn.hidden=false;
+    else { note.textContent=ex?'Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.'
+      :'Chrome на этом телефоне не даёт браузерный AR (WebXR). Пример шкафа можно поставить через Google Scene Viewer — откройте страницу без параметров.'; note.hidden=false; }
   });
-  document.getElementById('arBtn').addEventListener('click',()=>mv.activateAR());
-  mv.addEventListener('ar-status',e=>{ if(e.detail.status==='failed'){ const n=document.getElementById('noAR'); n.textContent='Не удалось запустить AR. Проверьте, что установлены «Сервисы Google Play для AR», и откройте ссылку в Chrome.'; n.hidden=false; } });
+  btn.addEventListener('click',()=>mv.activateAR());
+  mv.addEventListener('ar-status',e=>{
+    const st=e.detail.status;
+    diag.textContent=line()+' · запуск: '+({'session-started':'идёт','object-placed':'шкаф поставлен','not-presenting':'закрыт','failed':'ошибка'}[st]||st);
+    if(st==='failed'){ note.textContent='AR не запустился. Проверьте в Play Маркете, что установлены «Сервисы Google Play для AR», разрешите Chrome доступ к камере и попробуйте ещё раз.'; note.hidden=false; }
+  });
 })();
 })();
 </script>
