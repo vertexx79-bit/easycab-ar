@@ -559,10 +559,17 @@ function toGLB(obj){
     else { note.textContent=ex?'Этот браузер не умеет AR. Откройте ссылку в Chrome на Android с поддержкой Google ARCore или в Safari на iPhone.'
       :'Chrome на этом телефоне не даёт браузерный AR (WebXR). Пример шкафа можно поставить через Google Scene Viewer — откройте страницу без параметров.'; note.hidden=false; }
   });
-  btn.addEventListener('click',()=>mv.activateAR());
+  let tClick=0, started=false;
+  btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; note.hidden=true; mv.activateAR(); });
   mv.addEventListener('ar-status',e=>{
     const st=e.detail.status;
     diag.textContent=line()+' · запуск: '+({'session-started':'идёт','object-placed':'шкаф поставлен','not-presenting':'закрыт','failed':'ошибка'}[st]||st);
+    if(st==='session-started'||st==='object-placed') started=true;
+    // AR opened and shut at once without ever starting: the phone has no working Google AR services
+    if(st==='not-presenting'&&!started&&Date.now()-tClick<4000){
+      note.textContent='AR на этом телефоне не запустился: нет «Сервисов Google Play для AR». Если Play Маркет их не находит, модель телефона пока не поддерживается Google. Откройте эту же ссылку на другом телефоне.';
+      note.hidden=false;
+    }
     if(st==='failed'){ note.textContent='AR не запустился. Проверьте в Play Маркете, что установлены «Сервисы Google Play для AR», разрешите Chrome доступ к камере и попробуйте ещё раз.'; note.hidden=false; }
   });
 })();
