@@ -1079,18 +1079,30 @@ P.partBox=function(pid){
   const ex=[p.x1-p.x0,p.y1-p.y0,p.z1-p.z0].map(v=>Math.round(v*10)/10);
   return {pid,name:p.name||pid,box:[p.x0,p.x1,p.y0,p.y1,p.z0,p.z1],dims:ex.slice().sort((a,b)=>b-a),ext:ex,parent:(p.mov&&this.movG[p.mov])||this.inner};
 };
-// the smallest opening of the section tree that contains a point (x, y in mm)
-P.nicheAt=function(x,y){
-  let best=null;
-  for(const n of this.model.nodes){
-    if(!n.leaf) continue;
-    if(x<n.x0-1||x>n.x1+1||y<n.y0-1||y>n.y1+1) continue;
-    const a=(n.x1-n.x0)*(n.y1-n.y0); if(!best||a<best.a) best={n,a};
+/* The empty space around a point (editor mm): from the point, the nearest board in each of the six directions.
+   Every board counts — shelves, partitions, sides, top, bottom, back, drawer boxes — except fronts and the hanging rod,
+   so a tap between two shelves gives exactly the gap between them, not the whole section. */
+P.nicheAt=function(x,y,z){
+  const W=this.W, H=this.H, D=this.D;
+  if(z==null) z=(this.zBack+D)/2;
+  if(x<0||x>W||y<0||y>H) return null;
+  const solid=this.model.parts.filter(p=>!p.facade&&p.shape!=='cyl'&&p.mat!=='metal');
+  const inside=(p,a,b,c)=>a>=p[0]-0.01&&a<=p[1]+0.01&&b>=p[2]-0.01&&b<=p[3]+0.01&&c>=p[4]-0.01&&c<=p[5]+0.01;
+  // a point inside a board itself has no empty space around it
+  for(const p of solid) for(const b of (p.pieces||[[p.x0,p.x1,p.y0,p.y1,p.z0,p.z1]])) if(x>b[0]+0.01&&x<b[1]-0.01&&y>b[2]+0.01&&y<b[3]-0.01&&z>b[4]+0.01&&z<b[5]-0.01) return null;
+  let x0=0,x1=W,y0=0,y1=H,z0=0,z1=D;
+  for(const p of solid) for(const b of (p.pieces||[[p.x0,p.x1,p.y0,p.y1,p.z0,p.z1]])){
+    const inY=y>=b[2]-0.01&&y<=b[3]+0.01, inZ=z>=b[4]-0.01&&z<=b[5]+0.01, inX=x>=b[0]-0.01&&x<=b[1]+0.01;
+    if(inY&&inZ){ if(b[1]<=x+0.01) x0=Math.max(x0,b[1]); if(b[0]>=x-0.01) x1=Math.min(x1,b[0]); }
+    if(inX&&inZ){ if(b[3]<=y+0.01) y0=Math.max(y0,b[3]); if(b[2]>=y-0.01) y1=Math.min(y1,b[2]); }
+    if(inX&&inY){ if(b[5]<=z+0.01) z0=Math.max(z0,b[5]); if(b[4]>=z-0.01) z1=Math.min(z1,b[4]); }
   }
-  if(!best) return null;
-  const n=best.n, z0=this.zBack, z1=this.D;
-  return {id:n.id,name:n.label?`Проём ${n.label}`:'Проём',box:[n.x0,n.x1,n.y0,n.y1,z0,z1],
-    ext:[n.x1-n.x0,n.y1-n.y0,z1-z0].map(v=>Math.round(v*10)/10),parent:this.inner};
+  if(x1-x0<1||y1-y0<1||z1-z0<1) return null;
+  // which section it belongs to, for the name
+  let sec=null;
+  for(const n of this.model.nodes){ if(!n.leaf) continue; if(x>=n.x0-1&&x<=n.x1+1&&y>=n.y0-1&&y<=n.y1+1){ const a=(n.x1-n.x0)*(n.y1-n.y0); if(!sec||a<sec.a) sec={n,a}; } }
+  return {id:'niche',name:sec&&sec.n.label?`Ниша в ${sec.n.label}`:'Ниша',box:[x0,x1,y0,y1,z0,z1],
+    ext:[x1-x0,y1-y0,z1-z0].map(v=>Math.round(v*10)/10),parent:this.inner};
 };
 // world point → editor millimetres
 P.toLocal=function(v){ return this.inner.worldToLocal(v.clone()); };
@@ -1396,8 +1408,11 @@ function smoothing(minCut,beta){
     function hideCard(){ $('mcard').hidden=true; meas.clear(); }
     function measureHit(h){
       if(measWhat==='niche'){
-        const l=view.toLocal(h.point), n=view.nicheAt(l.x,l.y);
-        if(!n){ toast('Здесь нет проёма — нажмите внутри шкафа'); return; }
+        // step 2 mm off the tapped surface into the space in front of it; a tap on a front measures the space behind it
+        const l=view.toLocal(h.point), nrm=h.face?h.face.normal.clone().transformDirection(h.object.matrixWorld):null;
+        if(nrm){ const ln=view.toLocal(h.point.clone().add(nrm.multiplyScalar(0.002))); l.copy(ln); }
+        const n=view.nicheAt(l.x,l.y,(h.object.userData.facade||l.z>view.D||l.z<0)?null:l.z);
+        if(!n){ toast('Здесь нет пустого места — нажмите внутри шкафа, между деталями'); return; }
         meas.show(n,{pad:0}); showCard(n.name,`${fmt(n.ext[0])} × ${fmt(n.ext[1])} × ${fmt(n.ext[2])} мм`);
       } else {
         const b=view.partBox(h.object.userData.pid); if(!b) return;
@@ -1419,11 +1434,11 @@ function smoothing(minCut,beta){
         openFin('cam',view);
       } else if(!$('fin').hidden){ fp.onClose=null; $('fin').hidden=true; selBox.clear(); }
     }
-    $('tMeas').onclick=()=>{ setMode('meas'); if(mode==='meas') toast(measWhat==='niche'?'Нажмите внутри проёма':'Нажмите на деталь'); };
+    $('tMeas').onclick=()=>{ setMode('meas'); if(mode==='meas') toast(measWhat==='niche'?'Нажмите в пустое место шкафа':'Нажмите на деталь'); };
     $('tFin').onclick=()=>setMode('fin');
     $('measSeg').onclick=e=>{ const b=e.target.closest('[data-m]'); if(!b) return; measWhat=b.dataset.m;
       $('measSeg').querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
-      hideCard(); view.setGhost(measWhat==='niche'); toast(measWhat==='niche'?'Нажмите внутри проёма':'Нажмите на деталь'); };
+      hideCard(); view.setGhost(measWhat==='niche'); toast(measWhat==='niche'?'Нажмите в пустое место шкафа':'Нажмите на деталь'); };
     $('mClose').onclick=hideCard;
     $('tDoors').onclick=()=>{ view.setAll(!view.anyOpen()); updDoorsBtn(); };
     $('tPause').onclick=()=>{
@@ -1439,7 +1454,7 @@ function smoothing(minCut,beta){
         if(!h){ return; }
         fp.pid=h.object.userData.pid; selBox.show(view.partBox(fp.pid),{pad:2,noDims:true}); renderFin(); return;
       }
-      if(mode==='meas'){ if(h) measureHit(h); else toast(measWhat==='niche'?'Нажмите внутри проёма':'Нажмите на деталь'); return; }
+      if(mode==='meas'){ if(h) measureHit(h); else toast(measWhat==='niche'?'Нажмите в пустое место шкафа':'Нажмите на деталь'); return; }
       if(h&&h.object.userData.mov){ view.toggle(h.object.userData.mov); setTimeout(updDoorsBtn,0); }
       else if(h) toast('Нажмите на дверь или ящик');
     });
