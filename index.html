@@ -804,6 +804,9 @@ function toGLB(obj){
   /* Which way to put the cabinet in the room. A phone with working built-in AR gets only that.
      A phone without it (or where it shut at once) gets the printed-sheet mode, and remembers it. */
   let noAR=false; try{ noAR=localStorage.getItem('ecNoAR')==='1'; }catch(e){}
+  // ?sheet in the link opens the sheet mode directly, whatever the phone can do
+  const forceSheet=/[?&]sheet\b/.test(location.search);
+  if(forceSheet) noAR=true;
   function builtin(){ btn.hidden=false; tip.hidden=false; mk.hidden=true; }
   function sheetMode(remember){
     btn.hidden=true; tip.hidden=true; mk.hidden=false; $('mkRetry').hidden=!mv.canActivateAR;
@@ -811,14 +814,19 @@ function toGLB(obj){
   }
   mv.addEventListener('load',()=>{ if(mv.canActivateAR&&!noAR) builtin(); else sheetMode(false); });
   $('mkRetry').addEventListener('click',()=>{ try{ localStorage.removeItem('ecNoAR'); }catch(e){} builtin(); });
-  let tClick=0, started=false;
-  btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; mv.activateAR(); });
+  let tClick=0, started=false, tracked=false, live=false;
+  btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; tracked=false; mv.activateAR(); });
+  // the camera opened, but the phone never managed to find the floor: AR services refused this model of phone
+  mv.addEventListener('ar-tracking',e=>{ if(e.detail&&e.detail.status==='tracking') tracked=true; });
   mv.addEventListener('ar-status',e=>{
     const st=e.detail.status;
     if(debug) diag.textContent=line()+' · '+st;
-    if(st==='session-started'||st==='object-placed') started=true;
+    if(st==='session-started'){ started=true; live=true; }
+    if(st==='object-placed'){ started=true; tracked=true; }
     // opened and shut at once without ever starting, or failed outright: no working AR services on this phone
     if(st==='failed'||(st==='not-presenting'&&!started&&Date.now()-tClick<4000)) sheetMode(true);
+    else if(st==='not-presenting'&&live&&!tracked) sheetMode(true);
+    if(st==='not-presenting') live=false;
   });
   // the separate Google viewer bounces straight back when the phone has no AR services
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&tClick&&!started&&Date.now()-tClick<2500&&!btn.hidden) sheetMode(true); });
