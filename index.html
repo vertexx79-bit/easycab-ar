@@ -37,6 +37,7 @@ h1{margin:0;font-size:16px;font-weight:600}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:50px;border-radius:12px;border:0;background:var(--accent);color:var(--accent-ink);font:600 16px var(--f-body);width:100%;cursor:pointer;text-decoration:none}
 .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);min-height:44px;font-weight:500;font-size:14px}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+a.btn{text-decoration:none;display:flex;align-items:center;justify-content:center;color:inherit}
 .finrow{display:flex;align-items:center;gap:10px;min-height:48px;padding:6px 10px 6px 6px;border:1px solid var(--line);border-radius:12px;background:transparent;cursor:pointer;text-align:left;width:100%}
 .finrow .sw2{display:flex;flex:none}
 .finrow .sw2 img{width:30px;height:30px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
@@ -135,6 +136,8 @@ body.bz #finBtn,body.bz #pgOpen,body.bz #tFin,body.bz #measSeg [data-m="niche"]{
     <button class="finrow" id="finBtn" type="button"><span class="sw2" id="finSw"></span><span class="ft"><small>Отделка</small><b id="finName">—</b></span></button>
     <button class="btn ghost" id="pgOpen" type="button">Открыть двери</button>
   </div>
+  <div class="pair" id="linkRow" hidden><a class="btn ghost" id="toChrome" rel="noopener">Открыть в Chrome</a><button class="btn ghost" id="shareBtn" type="button">Поделиться ссылкой</button></div>
+  <p class="hint" id="linkNote" hidden></p>
   <button class="btn" id="arBtn" type="button" hidden>Поставить в комнате</button>
   <p class="hint" id="tip" hidden>Масштаб 1:1 зафиксирован: шкаф встанет в реальном размере. Пальцем можно повернуть и передвинуть.</p>
   <div id="mk" class="mk" hidden>
@@ -1657,15 +1660,26 @@ root.EC_B3DVIEW=B3DView;
 const F=window.EC_FINISH;
 
 /* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
+const MODEL_STORE='';   // address of the EasyCab model storage (Cloudflare Worker), set at build time
 function b64u(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
 async function readState(){
   // the model comes after # (links opened inside a browser) or as ?z= / ?j= / ?m= (links that ask for Chrome by name)
   let h=location.hash.slice(1);
   if(!h){ const q=new URLSearchParams(location.search); for(const k of ['z','j','b']) if(q.get(k)){ h=k+q.get(k); break; } }
+  // a short link: ?m=<id> — a model kept next to this page (examples), ?k=<id> — a model uploaded to the EasyCab storage
+  const q=new URLSearchParams(location.search), sid=q.get('m')||q.get('k');
+  if(!h&&sid){
+    try{
+      if(!/^[0-9a-z]{6,16}$/.test(sid)) throw new Error('bad id');
+      const url=q.get('m')?new URL('m/'+sid+'.bin',location.href).href:MODEL_STORE+'/m/'+sid;
+      const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+      return {b3d:new Uint8Array(await r.arrayBuffer()),short:true};
+    }catch(e){ console.warn('short link',e); return {missing:true}; }
+  }
   try{
     if(h[0]==='z'){ const ds=new Blob([b64u(h.slice(1))]).stream().pipeThrough(new DecompressionStream('deflate-raw')); return JSON.parse(await new Response(ds).text()); }
     if(h[0]==='j') return JSON.parse(new TextDecoder().decode(b64u(h.slice(1))));
-    if(h[0]==='b') return {b3d:b64u(h.slice(1))};   // a model from Базис: see EC_B3DVIEW.pack
+    if(h[0]==='b') return {b3d:b64u(h.slice(1)),long:true};   // a model from Базис: see EC_B3DVIEW.pack
   }catch(e){ console.warn('state',e); }
   return null;
 }
@@ -1705,7 +1719,10 @@ function smoothing(minCut,beta){
   const $=id=>document.getElementById(id);
   let S=await readState(); let ex=false, bz=null;
   // a Базис model instead of our cabinet: shown and placed as it is (no doors, finishes or openings to change)
+  let missing=false; if(S&&S.missing){ missing=true; S=null; }
+  let packed=null, cameLong=false;
   if(S&&S.b3d){
+    packed=S.b3d; cameLong=!!S.long;
     try{ bz=await EC_B3DVIEW.unpack(S.b3d); }catch(e){ console.warn('b3d',e); bz=null; }
     S=null;
   }
@@ -1720,7 +1737,36 @@ function smoothing(minCut,beta){
     if(!v0.partCount) $('size').textContent='в файле нет деталей';
   }
   $('size').textContent=`${S.W} × ${S.H} × ${S.D} мм`;
-  $('name').textContent=bz?(bz.name||'Модель из Базиса'):ex?'Шкаф · пример':(S.name||'Шкаф');
+  $('name').textContent=bz?(bz.name||'Модель из Базиса'):missing?'Модель по ссылке не найдена · показан пример':ex?'Шкаф · пример':(S.name||'Шкаф');
+  /* A short link to send in a messenger and to reopen in Chrome (the app's own browser cannot place things in a room).
+     A Базис model that came inside a long link is put into the EasyCab storage once and gets a short number. */
+  const ANDROID=/Android/i.test(navigator.userAgent);
+  const chromeHref=u=>{ const x=new URL(u); return `intent://${x.host}${x.pathname}${x.search}#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=${encodeURIComponent(u)};end`; };
+  const base=location.origin+location.pathname;
+  function showLink(url){
+    $('linkRow').hidden=false; $('toChrome').hidden=!ANDROID; $('toChrome').href=chromeHref(url);
+    if(!ANDROID) $('linkRow').style.gridTemplateColumns='1fr';
+    $('shareBtn').onclick=async()=>{
+      try{ if(navigator.share){ await navigator.share({title:$('name').textContent,url}); return; } }catch(e){ if(e&&e.name==='AbortError') return; }
+      try{ await navigator.clipboard.writeText(url); $('linkNote').textContent='Ссылка скопирована: '+url; }catch(e){ $('linkNote').textContent=url; }
+      $('linkNote').hidden=false;
+    };
+  }
+  (async()=>{
+    const q=new URLSearchParams(location.search), h=location.hash.slice(1);
+    if(bz&&!cameLong){ showLink(location.href.split('#')[0]); return; }
+    if(bz&&cameLong){
+      if(!MODEL_STORE){ return; }
+      $('linkNote').textContent='Готовлю короткую ссылку…'; $('linkNote').hidden=false;
+      try{
+        const r=await fetch(MODEL_STORE+'/up',{method:'POST',body:packed}); if(!r.ok) throw new Error('HTTP '+r.status);
+        const {id}=await r.json(); const url=base+'?k='+id;
+        history.replaceState(null,'',location.pathname+'?k='+id); $('linkNote').hidden=true; showLink(url);
+      }catch(e){ $('linkNote').textContent='Короткую ссылку сделать не удалось: нет связи с хранилищем. Модель показана.'; }
+      return;
+    }
+    if(!bz&&!ex&&!missing){ const z=h[0]==='z'?h.slice(1):q.get('z'); if(z&&z.length<6000) showLink(base+'?z='+z); }
+  })();
   const mv=$('mv'), diag=$('diag'), btn=$('arBtn'), tip=$('tip'), mk=$('mk');
   const debug=/[?&]debug/.test(location.search);
 
