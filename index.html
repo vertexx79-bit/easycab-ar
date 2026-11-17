@@ -120,6 +120,7 @@ model-viewer [slot="ar-button"]{display:none}
 .fnote{margin:0;padding:9px 11px;border-radius:10px;background:var(--bg);font-size:13px;color:var(--muted)}
 .fnote b{color:var(--ink);font-weight:600}
 @media (prefers-reduced-motion: reduce){ #camGl{transition:none} }
+body.bz #finBtn,body.bz #pgOpen,body.bz #tFin,body.bz #measSeg [data-m="niche"]{display:none!important}
 </style>
 </head>
 <body>
@@ -1163,6 +1164,495 @@ Measure.fmt=fmt;
 root.EC_MEASURE=Measure;
 })(typeof window!=='undefined'?window:globalThis);
 
+/* Reader for Базис-Мебельщик .b3d files (signature BZ85), worked out from sample files.
+   File:   'BZ85' header, an embedded PNG preview, then a zlib stream holding the model.
+   Model:  u32 key count, keys as (u32 length + ASCII); records refer to keys by index.
+   Record: u32 key index, u32 child count, u8 type, value —
+           0 container (children follow), 1 flag «yes», 2 flag «no», 3 u8, 4 i32, 5 f64, 8 i64,
+           6 UTF-16 text (u32 chars), 7 bytes (u32 length; text in cp1251, or binary geometry), 9 date (f64).
+   Contour (binary): u32 segment count, then segments in any order:
+           0x10 line: x1 y1 x2 y2 (f64);  0x12 arc: cx cy  x1 y1  x2 y2 (f64) + u8 (1 = counter-clockwise from 1 to 2).
+   Objects: 4002 panel (contour in its XY, thickness along +Z), 2004 profile (section extruded along Z by Thickness),
+            1005 block, 4001 group (both carry Objs), 2002 revolved body, 8100 auxiliary contour, 6000 guide line,
+            1001 bounding frame. Trans = X Y Z + quaternion Rx Ry Rz Rw, relative to the owner. Units: mm. */
+(function(root){
+'use strict';
+const B={};
+const td16=new TextDecoder('utf-16le');
+let td1251; try{ td1251=new TextDecoder('windows-1251'); }catch(e){ td1251=new TextDecoder(); }
+const BINARY=new Set(['Contour','TriData','Edges','Trajectory','Transform']);
+
+function findModel(u8,inflate){
+  let best=null;
+  for(let i=0;i<u8.length-2;i++){
+    if(u8[i]!==0x78||(u8[i+1]!==0x9c&&u8[i+1]!==0xda&&u8[i+1]!==0x01&&u8[i+1]!==0x5e)) continue;
+    let out; try{ out=inflate(u8.subarray(i)); }catch(e){ continue; }
+    if(!out||out.length<100) continue;
+    const dv=new DataView(out.buffer,out.byteOffset,out.byteLength), n=dv.getUint32(0,true);
+    if(n<5||n>2000) continue;
+    const head=String.fromCharCode.apply(null,out.subarray(0,Math.min(out.length,6000)));
+    if(head.indexOf('Objs')>=0&&head.indexOf('Model')>=0) best=out;
+  }
+  return best;
+}
+B.parse=function(buf,inflate){
+  const u8=buf instanceof Uint8Array?buf:new Uint8Array(buf);
+  if(String.fromCharCode(u8[0],u8[1],u8[2],u8[3])!=='BZ85') throw new Error('Это не файл Базиса: в начале нет подписи BZ85.');
+  const body=findModel(u8,inflate);
+  if(!body) throw new Error('Не нашёл в файле сжатую модель. Возможно, файл повреждён или сохранён другой версией Базиса.');
+  return B.parseBody(body);
+};
+// the unpacked model (keys + records), when it was already unpacked elsewhere
+B.parseBody=function(body){
+  const dv=new DataView(body.buffer,body.byteOffset,body.byteLength);
+  let p=0; const u32=()=>{ const v=dv.getUint32(p,true); p+=4; return v; };
+  const n=u32(), keys=[];
+  for(let i=0;i<n;i++){ const L=u32(); keys.push(String.fromCharCode.apply(null,body.subarray(p,p+L))); p+=L; }
+  let depth=0; const spans=[];   // spans: where each top-level record lies, so a file can be trimmed to the model alone
+  function rec(){
+    const k=u32(), cnt=u32(), t=body[p++], name=k<keys.length?keys[k]:'';
+    switch(t){
+      case 0: { const kids=[], top=depth++===0; for(let i=0;i<cnt&&p+9<=body.length;i++){ const s0=p; kids.push(rec()); if(top) spans.push({name:kids[kids.length-1][0],start:s0,end:p}); } depth--; return [name,kids]; }   // stop at the end of data even if a count promises more
+      case 1: return [name,true];
+      case 2: return [name,false];
+      case 3: return [name,body[p++]];
+      case 4: { const v=dv.getInt32(p,true); p+=4; return [name,v]; }
+      case 5: case 9: { const v=dv.getFloat64(p,true); p+=8; return [name,v]; }
+      case 8: { const lo=dv.getUint32(p,true), hi=dv.getInt32(p+4,true); const tail=body[p+8]; p+=9; return [name,{i64:hi*4294967296+lo,b:tail}]; }   // 8 + 1 bytes: meaning of the last byte not known yet
+      case 6: { const L=u32(); const v=td16.decode(body.subarray(p,p+2*L)); p+=2*L; return [name,v]; }
+      case 7: { const L=u32(); const raw=body.slice(p,p+L); p+=L; return [name,BINARY.has(name)?raw:td1251.decode(raw)]; }
+      default: throw new Error(`Неизвестный тип записи ${t} (ключ «${name}», позиция ${p-1}). Пришлите этот файл — разберу.`);
+    }
+  }
+  const doc=rec();
+  return {doc,keys,read:p,size:body.length,body,spans,keysEnd:4+keys.reduce((a,k)=>a+4+k.length,0)};
+};
+/* The model alone, as a small file: Базис keeps the whole undo history next to the model; for showing the model in a
+   room only the model itself is needed. Returns 'BZ85' + a zlib stream of keys + root holding the kept records. */
+B.compactBody=function(res,keep){
+  // only what drawing needs: no undo history, and no licence key or dongle number in a link that may be passed on
+  keep=keep||(n=>n==='VersionMajor'||n==='VersionMinor'||n==='Model');
+  const kept=res.spans.filter(s=>keep(s.name)), b=res.body;
+  const rootHead=b.subarray(res.keysEnd,res.keysEnd+9).slice();
+  new DataView(rootHead.buffer).setUint32(4,kept.length,true);
+  const parts=[b.subarray(0,res.keysEnd),rootHead].concat(kept.map(s=>b.subarray(s.start,s.end)));
+  const n=parts.reduce((a,x)=>a+x.length,0), out=new Uint8Array(n); let o=0; for(const x of parts){ out.set(x,o); o+=x.length; }
+  return out;
+};
+// a record list → plain object (first value of each key; containers stay as lists)
+B.obj=function(list){ const o={}; for(const [k,v] of list) if(!(k in o)) o[k]=v; return o; };
+
+// Exactly n segments are read: some contours keep per-segment colours and flags after them
+B.segments=function(raw){
+  const dv=new DataView(raw.buffer,raw.byteOffset,raw.byteLength), out=[]; let p=4;
+  const n=raw.length>=4?dv.getUint32(0,true):0;
+  const f=()=>{ const v=dv.getFloat64(p,true); p+=8; return v; };
+  while(out.length<n&&p<raw.length){
+    const t=raw[p++];
+    if(t===0x10){ out.push({t:'L',a:[f(),f()],b:[f(),f()]}); }
+    else if(t===0x12){ const c=[f(),f()], a=[f(),f()], b=[f(),f()]; out.push({t:'A',c,a,b,ccw:raw[p++]===1}); }
+    else if(t===0x11||t===0x14){ const c=[f(),f()], r=f(); out.push({t:'C',c,r,a:[c[0]+r,c[1]],b:[c[0]+r,c[1]],cw:t===0x14}); }   // full circle (0x14: the other way round)
+    else return {segs:out,bad:t};
+  }
+  // after the segments: one colour (TColor) per segment, when present
+  if(p+4*n<=raw.length){ const col=[]; for(let i=0;i<n;i++) col.push(dv.getUint32(p+4*i,true)); out.colors=col; }
+  return {segs:out};
+};
+function circlePts(s,step){ const n=Math.max(16,Math.ceil(2*Math.PI/(step||Math.PI/24))), pts=[]; for(let i=0;i<=n;i++){ const a=2*Math.PI*i/n; pts.push([s.c[0]+s.r*Math.cos(a),s.c[1]+s.r*Math.sin(a)]); } return pts; }
+function arcPts(s,step){
+  const a0=Math.atan2(s.a[1]-s.c[1],s.a[0]-s.c[0]), a1=Math.atan2(s.b[1]-s.c[1],s.b[0]-s.c[0]), r=Math.hypot(s.a[0]-s.c[0],s.a[1]-s.c[1]);
+  let sw=a1-a0;
+  if(s.ccw){ while(sw<=1e-9) sw+=2*Math.PI; } else { while(sw>=-1e-9) sw-=2*Math.PI; }
+  const n=Math.max(2,Math.ceil(Math.abs(sw)/(step||Math.PI/18))), pts=[];
+  for(let i=0;i<=n;i++){ const a=a0+sw*i/n; pts.push([s.c[0]+r*Math.cos(a),s.c[1]+r*Math.sin(a)]); }
+  return pts;
+}
+// segments come in any order: chain them into closed loops by their end points
+B.loops=function(segs){
+  const items=segs.map(s=>s.t==='L'?[s.a,s.b]:s.t==='C'?circlePts(s):arcPts(s)), used=new Array(items.length).fill(false), res=[];
+  const eq=(p,q)=>Math.abs(p[0]-q[0])<0.05&&Math.abs(p[1]-q[1])<0.05;
+  for(let i=0;i<items.length;i++){
+    if(used[i]) continue; used[i]=true; let loop=items[i].slice();
+    for(let guard=0;guard<items.length&&!eq(loop[0],loop[loop.length-1]);guard++){
+      let found=false;
+      for(let j=0;j<items.length;j++){
+        if(used[j]) continue; const it=items[j];
+        if(eq(it[0],loop[loop.length-1])){ loop=loop.concat(it.slice(1)); used[j]=found=true; break; }
+        if(eq(it[it.length-1],loop[loop.length-1])){ loop=loop.concat(it.slice().reverse().slice(1)); used[j]=found=true; break; }
+      }
+      if(!found) break;
+    }
+    res.push({pts:loop,closed:eq(loop[0],loop[loop.length-1])});
+  }
+  return res;
+};
+B.polyline=function(s){ return s.t==='L'?[s.a,s.b]:s.t==='C'?circlePts(s):arcPts(s); };
+/* Ready mesh (object 10000, TriData): u32 group count; each group: u32 + UTF-16 material name, 16 f64 (texture matrix),
+   u8, u32 triangle count, then 28 f32 per triangle: 3 vertices, face normal, 3 vertex normals, 1 word, 3 × (u, v). */
+B.mesh=function(raw){
+  const dv=new DataView(raw.buffer,raw.byteOffset,raw.byteLength); let p=0; const G=dv.getUint32(0,true); p=4; const groups=[];
+  for(let g=0;g<G&&p<raw.length;g++){
+    const L=dv.getUint32(p,true); const name=td16.decode(raw.subarray(p+4,p+4+2*L)); p+=4+2*L+128;
+    const n=dv.getUint32(p+1,true); p+=5;
+    const pos=new Float32Array(n*9), nrm=new Float32Array(n*9), uv=new Float32Array(n*6);
+    for(let i=0;i<n;i++){
+      const b=p+i*112, fl=k=>dv.getFloat32(b+4*k,true);
+      for(let k=0;k<9;k++){ pos[i*9+k]=fl(k); nrm[i*9+k]=fl(12+k); }
+      for(let k=0;k<6;k++) uv[i*6+k]=fl(22+k);
+    }
+    p+=n*112; groups.push({name,pos,nrm,uv,count:n});
+  }
+  return groups;
+};
+B.area=function(pts){ let a=0; for(let i=0;i<pts.length-1;i++) a+=pts[i][0]*pts[i+1][1]-pts[i+1][0]*pts[i][1]; return a/2; };
+
+/* Flattens the model into parts with their place in the block tree. */
+B.parts=function(res){
+  const model=(res.doc[1].find(r=>r[0]==='Model')||[0,[]])[1];
+  const out=[], groups=[];
+  function walk(list,parentPath,parentIds){
+    for(const r of list){
+      if(r[0]!=='Obj'||!Array.isArray(r[1])) continue;
+      const o=B.obj(r[1]), tr=Array.isArray(o.Trans)?B.obj(o.Trans):null;
+      const item={type:o.Type,name:o.Name||'',id:o.ID,mat:o.Mat||'',thick:o.Thick,thickness:o.Thickness,
+        art:o.ArtPos||'',des:o.Des||'',trans:tr,path:parentPath,owner:parentIds[parentIds.length-1]??null,raw:o};
+      // «пластик» in Базис: layers of sheet material on a face of the board, each with its own thickness
+      if(Array.isArray(o.Plastics)){ item.layers=o.Plastics.map(p=>B.obj(p[1])).filter(l=>l.Mat).map(l=>({mat:l.Mat,thick:+l.Thick||0,texDir:l.TexDir})); item.facing=item.layers.map(l=>l.mat); }
+      if(o.Contour instanceof Uint8Array){ const s=B.segments(o.Contour); item.segs=s.segs; if(s.bad!==undefined) item.segBad=s.bad; }
+      out.push(item);
+      if(Array.isArray(o.Objs)){ groups.push(item); walk(o.Objs,parentPath.concat([item.name||'Блок']),parentIds.concat([item.id])); }
+    }
+  }
+  walk(model,[],[]);
+  return {parts:out,groups};
+};
+B.TYPES={1001:'Габаритная рамка',1004:'Вычитание тел',1005:'Блок',4001:'Группа',4002:'Панель',2004:'Профиль',2002:'Тело вращения',10000:'Готовое тело (сетка)',8100:'Контур',8002:'Окружность',6000:'Линия'};
+root.EC_B3D=B;
+if(typeof module!=='undefined') module.exports=B;
+})(typeof window!=='undefined'?window:globalThis);
+
+/* How a material looks, worked out from its name.
+   Mirror → a real mirror (reflects the model), glass → see-through, metals → metallic sheen,
+   gloss → a lacquer coat with highlights, wood, stone, marble → a drawn texture at real scale (one tile ≈ 600 mm).
+   Anything else → a calm board colour with a soft matt finish. */
+(function(root){
+'use strict';
+const L={};
+const RX={
+  mirror:/зеркал|mirror/i,
+  lacobel:/лакобел|lacobel|крашен\S*\s+стекл|стекл\S*\s+крашен/i,
+  glass:/стекл|glass|триплекс|оргстекл|поликарбонат/i,
+  metal:/алюм|хром|нерж|стал[ьи]|металл|латун|золот|бронз|медь|медн|steel|chrome|alum|brass/i,
+  wood:/дуб|орех|ясен|венге|бук|вишн|кл[её]н|бер[её]з|сосн|ольх|\bтик\b|зебрано|махагон|шпон|тортона|сонома|галифакс|ноче|сакура|груш|акаци|walnut|oak|wood/i,
+  marble:/мрамор|marble|оникс|onyx/i,
+  stone:/бетон|кам[еня]|гранит|сланец|травертин|concrete|stone|loft/i,
+  gloss:/гл[яе]н|gloss|акрил|лакир|\bлак\b|high ?gloss/i,
+  matt:/супермат|матов|\bмат\b|софт|soft ?touch/i
+};
+function metalColor(n){
+  if(/золот|латун|brass|gold/i.test(n)) return ['#c9a24c',.28];
+  if(/бронз/i.test(n)) return ['#a5784e',.32];
+  if(/медь|медн/i.test(n)) return ['#b87348',.3];
+  if(/хром|chrome/i.test(n)) return ['#e8ebee',.08];
+  if(/черн|чёрн|black/i.test(n)) return ['#2b2d2f',.35];
+  return ['#c6cacd',.3];
+}
+// spec: what kind of surface and with which colour; base(name) gives the board colour for plain materials
+/* Library of materials whose look is known — taken from Базис screenshots (17.11.2026, pylon model).
+   An entry matches a material by its code (the part after the line break, e.g. «0000091»), else by its exact name,
+   else by a name pattern. Anything not in the library is guessed from the words in its name. */
+L.LIB=[
+  {code:'0000091', spec:{kind:'plain',color:'#420202',rough:.55}, note:'МДФ 16 мм, бордо'},
+  {code:'0000092', spec:{kind:'plain',color:'#420202',rough:.55}, note:'МДФ 18 мм, бордо'},
+  // polyurethane decor (Европласт articles 1.xx.xxx): peach with a soft sheen
+  {re:/молдинг|карниз|капител|ствол|база|розетк|орнамент|плинтус|обрамлен|пилястр|кронштейн|наличник/i, re2:/1\.\d{2}\.\d{3}/, spec:{kind:'plain',color:'#d9792e',rough:.45}, note:'декор Европласт, персик'}
+];
+L.fromLib=function(full){
+  const s=String(full||''), parts=s.split(/\r|\n/), name=parts[0].replace(/\s+/g,' ').trim(), code=(parts[1]||'').trim();
+  for(const e of L.LIB){
+    if(e.code&&code&&e.code===code) return Object.assign({},e.spec,{lib:e.note});
+    if(e.name&&e.name===name) return Object.assign({},e.spec,{lib:e.note});
+    if(e.re&&e.re.test(name)&&(!e.re2||e.re2.test(name))) return Object.assign({},e.spec,{lib:e.note});
+  }
+  return null;
+};
+L.spec=function(name,base){
+  const n=String(name||'');
+  if(RX.mirror.test(n)) return {kind:'mirror',color:'#dfe6e9',rough:.03,metal:1};
+  if(RX.lacobel.test(n)) return {kind:'gloss',color:base(n),rough:.06,metal:0,coat:1};
+  if(RX.glass.test(n)) return {kind:'glass',color:/тон|бронз|графит|сер/i.test(n)?'#7d8a8c':'#d5e6e8',rough:.04,metal:0,opacity:.24};
+  if(RX.metal.test(n)){ const [c,r]=metalColor(n); return {kind:'metal',color:c,rough:r,metal:.95}; }
+  const gloss=RX.gloss.test(n), matt=RX.matt.test(n);
+  const finish=o=>Object.assign(o,gloss?{rough:.1,coat:1}:matt?{rough:.85}:{});
+  if(RX.marble.test(n)) return finish({kind:'textured',tex:'marble',color:base(n)==='#efeeea'?'#ecebe6':base(n),rough:.25,metal:0});
+  if(RX.wood.test(n)) return finish({kind:'textured',tex:'wood',color:base(n),rough:.58,metal:0});
+  if(RX.stone.test(n)) return finish({kind:'textured',tex:'stone',color:base(n),rough:.8,metal:0});
+  return finish({kind:'plain',color:base(n),rough:.62,metal:0});
+};
+
+/* ---------- drawn textures ---------- */
+function rng(seed){ let s=0; for(const c of seed) s=(s*31+c.charCodeAt(0))>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
+function shade(css,k){
+  const c=new THREE.Color(css); const f=v=>Math.max(0,Math.min(1,k>0?v+(1-v)*k:v*(1+k)));
+  return `rgb(${Math.round(f(c.r)*255)},${Math.round(f(c.g)*255)},${Math.round(f(c.b)*255)})`;
+}
+const canv={};
+function draw(kind,color,key){
+  const id=kind+'|'+color+'|'+key; if(canv[id]) return canv[id];
+  const N=512, c=document.createElement('canvas'); c.width=c.height=N; const x=c.getContext('2d'), r=rng(id);
+  x.fillStyle=color; x.fillRect(0,0,N,N);
+  if(kind==='wood'){
+    for(let b=0;b<4;b++){ x.fillStyle=shade(color,(r()-0.5)*0.1); x.globalAlpha=.5; x.fillRect(b*N/4,0,N/4,N); }
+    x.globalAlpha=1;
+    for(let i=0;i<160;i++){
+      const x0=r()*N, amp=2+r()*6, ph=r()*6.28, fr=1+r()*2.5;
+      x.strokeStyle=shade(color,-(0.08+r()*0.24)); x.globalAlpha=0.16+r()*0.34; x.lineWidth=0.4+r()*1.6; x.beginPath();
+      for(let y=0;y<=N;y+=8){ const xx=x0+Math.sin(y/N*6.28*fr+ph)*amp; y?x.lineTo(xx,y):x.moveTo(xx,y); }
+      x.stroke();
+    }
+    for(let i=0;i<3;i++){ const cx=r()*N, cy=r()*N, rw=20+r()*40; x.strokeStyle=shade(color,-0.26); x.globalAlpha=.22; x.lineWidth=1.2;
+      for(let k=0;k<5;k++){ x.beginPath(); x.ellipse(cx,cy,rw*(0.4+k*0.18),rw*3*(0.4+k*0.18),0,Math.PI*1.05,Math.PI*1.95); x.stroke(); } }
+  } else if(kind==='stone'){
+    const img=x.getImageData(0,0,N,N), p=img.data;
+    for(let i=0;i<p.length;i+=4){ const n=(r()-0.5)*24; p[i]+=n; p[i+1]+=n; p[i+2]+=n; }
+    x.putImageData(img,0,0);
+    for(let i=0;i<90;i++){ x.fillStyle=shade(color,(r()-0.5)*0.22); x.globalAlpha=0.08+r()*0.12; x.beginPath(); x.arc(r()*N,r()*N,6+r()*44,0,6.28); x.fill(); }
+    for(let i=0;i<240;i++){ x.fillStyle=shade(color,-0.35); x.globalAlpha=0.3; x.beginPath(); x.arc(r()*N,r()*N,0.6+r()*1.5,0,6.28); x.fill(); }
+  } else if(kind==='marble'){
+    for(let i=0;i<14;i++){
+      let px=r()*N, py=0; x.strokeStyle=shade('#8a8a86',(r()-0.5)*0.3); x.globalAlpha=0.12+r()*0.3; x.lineWidth=0.6+r()*2.2; x.beginPath(); x.moveTo(px,py);
+      while(py<N){ px+=(r()-0.5)*26; py+=10+r()*18; x.lineTo(px,py); } x.stroke();
+    }
+  }
+  x.globalAlpha=1;
+  return canv[id]=c;
+}
+const TILE=600;
+/* Material for one part. alongX: the grain should run along the part's X (its longer side). */
+L.material=function(spec,alongX,angle){
+  let m;
+  const col=new THREE.Color(spec.color).convertSRGBToLinear();
+  const common={color:col,roughness:spec.rough,metalness:spec.metal||0};
+  if(spec.kind==='glass'){
+    m=new THREE.MeshPhysicalMaterial(Object.assign(common,{transparent:true,opacity:spec.opacity,depthWrite:false,side:THREE.DoubleSide,clearcoat:1,clearcoatRoughness:.05}));
+  } else if(spec.coat){
+    m=new THREE.MeshPhysicalMaterial(Object.assign(common,{clearcoat:1,clearcoatRoughness:.06}));
+  } else m=new THREE.MeshStandardMaterial(common);
+  if(spec.kind==='textured'){
+    const t=new THREE.CanvasTexture(draw(spec.tex,spec.color,'')); t.encoding=THREE.sRGBEncoding;
+    t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(1/TILE,1/TILE); t.anisotropy=4;
+    // the grain is drawn along the texture's v; turning it 90° lays it along the part's X
+    t.rotation=(alongX?Math.PI/2:0)+(angle||0);
+    m.map=t; m.color.setRGB(1,1,1);
+  }
+  m.userData.base={transparent:m.transparent,opacity:m.opacity,depthWrite:m.depthWrite};
+  return m;
+};
+L.swatchColor=spec=>spec.kind==='mirror'?'linear-gradient(135deg,#f4f7f8,#aab6ba 55%,#e8eef0)':spec.kind==='glass'?'linear-gradient(135deg,#e6f1f2,#b6cfd2)':spec.color;
+L.label={mirror:'зеркало',glass:'стекло',metal:'металл',gloss:'глянец',textured:'',plain:''};
+root.EC_LOOK=L;
+})(typeof window!=='undefined'?window:globalThis);
+
+/* A Базис model (.b3d) as three.js meshes for the AR page: the same shapes and looks as the B3D viewer, but made so
+   they survive export to a .glb file (built-in AR) and draw well over a camera picture:
+   — mitres of profiles are cut into the geometry itself (a .glb has no clipping planes);
+   — texture scale and direction are written into the texture coordinates (a .glb keeps no texture repeat/rotation);
+   — a mirror becomes a light glossy surface (there is no room to reflect in a camera picture).
+   Needs THREE, EC_B3D, EC_LOOK. Units: mm in, the view's root is in metres. */
+(function(root){
+'use strict';
+const B=root.EC_B3D, L=root.EC_LOOK;
+const matName=m=>String(m||'').split(/\r|\n/)[0].replace(/\s+/g,' ').trim()||'Без материала';
+const WORDS=[[/орех|walnut/i,'#7a5136'],[/венге/i,'#3d2b22'],[/дуб/i,'#b8925e'],[/ясень|клён|клен|береза|берёза|бук/i,'#d6c3a2'],[/вишня/i,'#8d4a33'],
+  [/бел|white/i,'#efeeea'],[/черн|чёрн|black/i,'#2a2b2c'],[/граф|антрац|сер/i,'#6b7073'],[/зеркал/i,'#c9d6dc'],[/стекл/i,'#bcd3d8'],
+  [/алюм|металл|хром|сталь/i,'#b9bdc0'],[/мдф|mdf|хдф|двп/i,'#d9c7a8'],[/смл|лдсп|дсп/i,'#cdb99a'],[/карниз|молдинг|орнамент|багет|плинтус|розетк|пилястр|капител|ствол|колонн|\bбаза\b|кронштейн|наличник|полиуретан|декор|(?:^|\s|-)\s?1\.\d{2}\.\d{3}/i,'#ece4d2']];
+function colorOf(m){
+  const n=matName(m); for(const [re,c] of WORDS) if(re.test(n)) return c;
+  let h=0; for(const ch of n) h=(h*31+ch.charCodeAt(0))>>>0;
+  const c=new THREE.Color(); c.setHSL((h%360)/360,.28,(62+(h>>9)%14)/100); return '#'+c.getHexString();
+}
+function lookOf(name){
+  const sp=L.fromLib(name)||L.spec(matName(name),n=>colorOf(n));
+  if(sp.kind==='mirror') return {kind:'plain',color:'#cfd8dc',rough:.12,metal:.35};
+  if(sp.kind==='glass') return Object.assign({},sp,{opacity:.35});
+  return sp;
+}
+function quatMatrix(t){
+  const m=new THREE.Matrix4(); if(!t) return m;
+  m.compose(new THREE.Vector3(t.X||0,t.Y||0,t.Z||0),new THREE.Quaternion(t.Rx||0,t.Ry||0,t.Rz||0,t.Rw==null?1:t.Rw).normalize(),new THREE.Vector3(1,1,1));
+  return m;
+}
+function inside(pt,poly){ let c=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ const a=poly[i],b=poly[j]; if(((a[1]>pt[1])!==(b[1]>pt[1]))&&(pt[0]<(b[0]-a[0])*(pt[1]-a[1])/(b[1]-a[1])+a[0])) c=!c; } return c; }
+function shapesOf(segs){
+  const loops=B.loops(segs).filter(l=>l.closed&&l.pts.length>3);
+  loops.forEach(l=>{ l.a=Math.abs(B.area(l.pts)); }); loops.sort((a,b)=>b.a-a.a);
+  const outers=[];
+  for(const l of loops){ const host=outers.find(o=>inside(l.pts[0],o.l.pts)&&!o.holes.some(h=>inside(l.pts[0],h.pts))); if(host) host.holes.push(l); else outers.push({l,holes:[]}); }
+  return outers.map(o=>{ const s=new THREE.Shape(o.l.pts.map(p=>new THREE.Vector2(p[0],p[1]))); o.holes.forEach(h=>s.holes.push(new THREE.Path(h.pts.map(p=>new THREE.Vector2(p[0],p[1]))))); return s; });
+}
+function bbox2(segs){ const xs=[],ys=[]; for(const s of segs) for(const p of [s.a,s.b]){ xs.push(p[0]); ys.push(p[1]); } return [Math.min(...xs),Math.max(...xs),Math.min(...ys),Math.max(...ys)]; }
+const grainX=(dir,longX)=>dir===1?true:dir===2?false:!!longX;
+
+/* Cut a geometry by planes, keeping the side where n·p + d ≥ 0. Every attribute is interpolated along the cut.
+   The cut face itself stays open: at a mitre it is covered by the neighbouring piece. */
+function clipGeometry(g,planes){
+  if(g.index) g=g.toNonIndexed();
+  const names=Object.keys(g.attributes), A=names.map(n=>g.attributes[n]), pos=g.attributes.position;
+  const groups=g.groups.length?g.groups:[{start:0,count:pos.count,materialIndex:0}];
+  const out=names.map(()=>[]), newGroups=[]; let w=0;
+  const vert=i=>A.map(a=>{ const v=[]; for(let c=0;c<a.itemSize;c++) v.push(a.array[i*a.itemSize+c]); return v; });
+  const lerp=(p,q,t)=>p.map((arr,k)=>arr.map((x,c)=>x+(q[k][c]-x)*t));
+  const dist=(v,pl)=>pl.x*v[0][0]+pl.y*v[0][1]+pl.z*v[0][2]+pl.d;
+  for(const gr of groups){
+    const st=w;
+    for(let i=gr.start;i<gr.start+gr.count;i+=3){
+      let poly=[vert(i),vert(i+1),vert(i+2)];
+      for(const pl of planes){
+        const res=[];
+        for(let k=0;k<poly.length;k++){
+          const a=poly[k], b=poly[(k+1)%poly.length], da=dist(a,pl), db=dist(b,pl);
+          if(da>=0) res.push(a);
+          if((da>=0)!==(db>=0)) res.push(lerp(a,b,da/(da-db)));
+        }
+        poly=res; if(poly.length<3) break;
+      }
+      if(poly.length<3) continue;
+      for(let k=1;k<poly.length-1;k++) for(const v of [poly[0],poly[k],poly[k+1]]){ v.forEach((arr,j)=>out[j].push(...arr)); w++; }
+    }
+    if(w>st) newGroups.push({start:st,count:w-st,materialIndex:gr.materialIndex});
+  }
+  const r=new THREE.BufferGeometry();
+  names.forEach((n,j)=>r.setAttribute(n,new THREE.Float32BufferAttribute(out[j],A[j].itemSize)));
+  newGroups.forEach(x=>r.addGroup(x.start,x.count,x.materialIndex));
+  return r;
+}
+// the texture's scale and turn written into the uv attribute, so the .glb shows the pattern at real size
+function bakeUV(g,mats){
+  const m=[].concat(mats).find(x=>x&&x.map); if(!m||!g.attributes.uv) return;
+  const t=m.map; t.updateMatrix(); const uv=g.attributes.uv, v=new THREE.Vector2();
+  for(let i=0;i<uv.count;i++){ v.set(uv.getX(i),uv.getY(i)).applyMatrix3(t.matrix); uv.setXY(i,v.x,v.y); }
+  uv.needsUpdate=true;
+  for(const x of [].concat(mats)) if(x&&x.map){ x.map.repeat.set(1,1); x.map.rotation=0; x.map.offset.set(0,0); x.map.center.set(0,0); x.map.updateMatrix(); }
+}
+// ExtrudeGeometry keeps both big faces in one group: the face at z = zFront first, then the other face, then the edges
+function splitFaces(g,zFront){
+  const gr=g.groups; if(gr.length<2) return;
+  const cap=gr[0], pos=g.attributes.position, names=Object.keys(g.attributes), tri=[[],[],[]];
+  for(let i=cap.start;i<cap.start+cap.count;i+=3){ const z=(pos.getZ(i)+pos.getZ(i+1)+pos.getZ(i+2))/3; tri[Math.abs(z-zFront)<0.01?0:1].push(i); }
+  for(let i=gr[1].start;i<gr[1].start+gr[1].count;i+=3) tri[2].push(i);
+  const out={}; names.forEach(n=>{ const a=g.attributes[n]; out[n]=new a.array.constructor(a.array.length); });
+  let w=0; g.clearGroups();
+  tri.forEach((list,k)=>{ const st=w; for(const i of list) for(let v=0;v<3;v++,w++) names.forEach(n=>{ const a=g.attributes[n], sz=a.itemSize; for(let c=0;c<sz;c++) out[n][w*sz+c]=a.array[(i+v)*sz+c]; }); g.addGroup(st,w-st,k); });
+  names.forEach(n=>{ g.attributes[n].array.set(out[n]); g.attributes[n].needsUpdate=true; });
+}
+
+/* The model for the AR page. The returned object answers the same questions the AR page asks of a cabinet. */
+function B3DView(bytes,name){
+  const res=B.parseBody(bytes), {parts}=B.parts(res);
+  this.name=name||'Модель из Базиса';
+  this.model={movs:[],parts:[],nodes:[]}; this.anim={}; this.movG={}; this.movInfo={}; this.meshes=[]; this.parts={};
+  const world=new Map();
+  for(const p of parts){
+    const pm=p.owner!=null&&world.has(p.owner)?world.get(p.owner):new THREE.Matrix4();
+    p.world=pm.clone().multiply(quatMatrix(p.trans)); if(p.id!=null) world.set(p.id,p.world);
+  }
+  const inner=this.inner=new THREE.Group();
+  let n=0;
+  const add=(p,g,alongX,faced,depthZ)=>{
+    const top=p.layers&&p.layers.length?p.layers[p.layers.length-1]:null;
+    let sp=lookOf(top?top.mat:p.mat);
+    if(!g.attributes.uv&&sp.kind==='textured') sp=Object.assign({},sp,{kind:'plain'});   // a ready mesh without texture coordinates
+    let mat=L.material(sp,grainX(top?top.texDir:p.raw.TexDir,alongX),p.raw.TexAngle);
+    if(faced){ const bm=L.material(lookOf(p.mat),grainX(p.raw.TexDir,alongX),p.raw.TexAngle); mat=[mat,bm,bm]; }
+    if(p.clip&&p.clip.length){ g=clipGeometry(g,p.clip); if(!g.attributes.position.count) return; }
+    bakeUV(g,mat);
+    const mesh=new THREE.Mesh(g,mat);
+    p.world.decompose(mesh.position,mesh.quaternion,mesh.scale);
+    const pid='b'+(n++); mesh.name=p.name||pid; mesh.userData={pid,mov:null,facade:false};
+    this.parts[pid]={id:pid,name:(p.name||'Деталь').trim(),src:p};
+    inner.add(mesh); this.meshes.push(mesh);
+  };
+  for(const p of parts){
+    if(!(p.segs&&p.segs.length)) continue;
+    if(p.type===4002){
+      const b=bbox2(p.segs), T=Math.abs(p.thick||0), ft=p.layers?p.layers.reduce((a,l)=>a+l.thick,0):0, shapes=shapesOf(p.segs);
+      if(!shapes.length) continue;
+      let g; try{ g=new THREE.ExtrudeGeometry(shapes,{depth:Math.max(.1,T+ft),bevelEnabled:false,curveSegments:1}); }catch(e){ continue; }
+      const z0=(p.thick||0)<0?p.thick:0; if(z0) g.translate(0,0,z0);
+      const faced=!!(p.facing&&p.facing.length); if(faced) splitFaces(g,z0+T+ft);
+      p.dims=[Math.max(b[1]-b[0],b[3]-b[2]),Math.min(b[1]-b[0],b[3]-b[2]),T+ft];
+      add(p,g,(b[1]-b[0])>(b[3]-b[2]),faced);
+    } else if(p.type===2004){
+      const len=Math.abs(p.thickness||0), shapes=shapesOf(p.segs); if(!shapes.length) continue;
+      if(Array.isArray(p.raw.ClipPlanes)) p.clip=p.raw.ClipPlanes.map(c=>B.obj(c[1])).filter(c=>c.d!=null);
+      let g; try{ g=new THREE.ExtrudeGeometry(shapes,{depth:Math.max(.1,len),bevelEnabled:false,curveSegments:1}); }catch(e){ continue; }
+      if((p.thickness||0)<0) g.translate(0,0,-len);
+      add(p,g,false,false);
+    } else if(p.type===2002){
+      const loop=B.loops(p.segs).filter(l=>l.closed).sort((a,b)=>Math.abs(B.area(b.pts))-Math.abs(B.area(a.pts)))[0]; if(!loop) continue;
+      let pts=loop.pts.map(q=>new THREE.Vector2(Math.abs(q[0]),q[1]));
+      if(B.area(loop.pts)*(loop.pts[0][0]<=0?-1:1)<0) pts=pts.reverse();
+      const g=new THREE.LatheGeometry(pts,64); g.rotateX(Math.PI/2); g.computeVertexNormals();
+      add(p,g,false,false); this.meshes[this.meshes.length-1].material.side=THREE.DoubleSide;
+    }
+  }
+  for(const p of parts){
+    if(p.type!==10000||!(p.raw.TriData instanceof Uint8Array)) continue;
+    let gs=[]; try{ gs=B.mesh(p.raw.TriData); }catch(e){}
+    const tris=gs.reduce((a,g)=>a+g.count,0); if(!tris) continue;
+    if((!p.mat||p.mat==='Noname')&&gs[0]) p.mat=gs[0].name;
+    const pos=new Float32Array(tris*9), nrm=new Float32Array(tris*9); let o=0;
+    for(const g of gs){ pos.set(g.pos,o); nrm.set(g.nrm,o); o+=g.pos.length; }
+    const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3)); g.setAttribute('normal',new THREE.BufferAttribute(nrm,3));
+    add(p,g,false,false);
+    this.meshes[this.meshes.length-1].material.side=THREE.DoubleSide;
+  }
+  // Базис: Y up, the front faces +Z. The AR page wants the model standing on y = 0, its back at z = 0, centred in x.
+  inner.updateMatrixWorld(true);
+  const box=new THREE.Box3().setFromObject(inner), s=box.getSize(new THREE.Vector3());
+  this.W=s.x; this.H=s.y; this.D=s.z;
+  inner.position.set(-box.min.x,-box.min.y,-box.min.z);
+  const g=new THREE.Group(); g.add(inner);
+  this.holder=g;
+  g.position.set(-this.W/2*0.001,0,-this.D/2*0.001); g.scale.setScalar(0.001);
+  this.root=new THREE.Group(); this.root.add(g);
+  this.inner=g;   // measurements are in the holder's millimetres: x 0…W, y 0…H, z 0…D
+  this.partCount=this.meshes.length;
+}
+const P=B3DView.prototype;
+P.zoneOf=()=>null; P.decorOf=()=>null; P.applyFinish=function(){}; P.setGhost=function(){};
+P.isOpen=()=>false; P.anyOpen=()=>false; P.toggle=function(){}; P.setAll=function(){}; P.setPose=function(){}; P.tick=()=>false;
+P.nicheAt=()=>null;
+P.partBox=function(pid){
+  const m=this.meshes.find(x=>x.userData.pid===pid), p=this.parts[pid]; if(!m) return null;
+  this.root.updateMatrixWorld(true);
+  const inv=new THREE.Matrix4().copy(this.inner.matrixWorld).invert();
+  const b=new THREE.Box3(); m.geometry.computeBoundingBox();
+  const gb=m.geometry.boundingBox, c=new THREE.Vector3();
+  for(let i=0;i<8;i++){ c.set(i&1?gb.max.x:gb.min.x,i&2?gb.max.y:gb.min.y,i&4?gb.max.z:gb.min.z).applyMatrix4(m.matrixWorld).applyMatrix4(inv); b.expandByPoint(c); }
+  const ext=[b.max.x-b.min.x,b.max.y-b.min.y,b.max.z-b.min.z].map(v=>Math.round(v*10)/10);
+  const dims=(p.src.dims||ext.slice().sort((a,b)=>b-a)).map(v=>Math.round(v*10)/10);
+  return {pid,name:p.name,box:[b.min.x,b.max.x,b.min.y,b.max.y,b.min.z,b.max.z],dims,ext,parent:this.inner};
+};
+P.toLocal=function(v){ return this.inner.worldToLocal(v.clone()); };
+
+/* Link payload: 'BZ85', u16 name length, the name in UTF-8, then a zlib stream of the model alone */
+B3DView.pack=async function(fileBytes,name,inflate){
+  const res=B.parse(fileBytes,inflate), body=B.compactBody(res);
+  const cs=new Blob([body]).stream().pipeThrough(new CompressionStream('deflate'));
+  const z=new Uint8Array(await new Response(cs).arrayBuffer()), nm=new TextEncoder().encode(String(name||'').slice(0,80));
+  const out=new Uint8Array(6+nm.length+z.length); out.set([66,90,56,53],0); new DataView(out.buffer).setUint16(4,nm.length,true); out.set(nm,6); out.set(z,6+nm.length);
+  return out;
+};
+B3DView.unpack=async function(u8){
+  if(String.fromCharCode(u8[0],u8[1],u8[2],u8[3])!=='BZ85') throw new Error('not b3d');
+  const nl=new DataView(u8.buffer,u8.byteOffset).getUint16(4,true), name=new TextDecoder().decode(u8.subarray(6,6+nl));
+  const ds=new Blob([u8.subarray(6+nl)]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return {name,body:new Uint8Array(await new Response(ds).arrayBuffer())};
+};
+root.EC_B3DVIEW=B3DView;
+})(typeof window!=='undefined'?window:globalThis);
+
 const F=window.EC_FINISH;
 
 /* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
@@ -1172,6 +1662,7 @@ async function readState(){
   try{
     if(h[0]==='z'){ const ds=new Blob([b64u(h.slice(1))]).stream().pipeThrough(new DecompressionStream('deflate-raw')); return JSON.parse(await new Response(ds).text()); }
     if(h[0]==='j') return JSON.parse(new TextDecoder().decode(b64u(h.slice(1))));
+    if(h[0]==='b') return {b3d:b64u(h.slice(1))};   // a model from Базис: see EC_B3DVIEW.pack
   }catch(e){ console.warn('state',e); }
   return null;
 }
@@ -1209,13 +1700,24 @@ function smoothing(minCut,beta){
 
 (async()=>{
   const $=id=>document.getElementById(id);
-  let S=await readState(); let ex=false;
-  if(!S){ S=M.presetState('wardrobe'); ex=true; }
+  let S=await readState(); let ex=false, bz=null;
+  // a Базис model instead of our cabinet: shown and placed as it is (no doors, finishes or openings to change)
+  if(S&&S.b3d){
+    try{ bz=await EC_B3DVIEW.unpack(S.b3d); }catch(e){ console.warn('b3d',e); bz=null; }
+    S=null;
+  }
+  if(!S){ S=M.presetState('wardrobe'); ex=!bz; }
   S=M.normState(Object.assign(M.presetState('wardrobe'),S));
-  const model=M.build(S);
+  const model=bz?{movs:[],parts:[],nodes:[]}:M.build(S);
+  const makeView=()=>bz?new EC_B3DVIEW(bz.body,bz.name):new EC_CABINET(model,S,finish,M.makeCurve);
   let finish=F.fromState(S);
+  if(bz){
+    const v0=makeView(); S.W=Math.round(v0.W); S.H=Math.round(v0.H); S.D=Math.round(v0.D);
+    document.body.classList.add('bz');
+    if(!v0.partCount) $('size').textContent='в файле нет деталей';
+  }
   $('size').textContent=`${S.W} × ${S.H} × ${S.D} мм`;
-  $('name').textContent=ex?'Шкаф · пример':(S.name||'Шкаф');
+  $('name').textContent=bz?(bz.name||'Модель из Базиса'):ex?'Шкаф · пример':(S.name||'Шкаф');
   const mv=$('mv'), diag=$('diag'), btn=$('arBtn'), tip=$('tip'), mk=$('mk');
   const debug=/[?&]debug/.test(location.search);
 
@@ -1223,7 +1725,7 @@ function smoothing(minCut,beta){
   let pageOpen=false, glbUrl=null, finChanged=false, glbJob=0, glbDirty=false;
   async function rebuildGLB(){
     const job=++glbJob;
-    const v=new EC_CABINET(model,S,finish,M.makeCurve);
+    const v=makeView();
     if(pageOpen) model.movs.forEach(m=>v.setPose(m.id,1));
     const blob=await toGLB(v.root); if(job!==glbJob) return;
     if(glbUrl) URL.revokeObjectURL(glbUrl);
@@ -1356,10 +1858,12 @@ function smoothing(minCut,beta){
     cam.hidden=false; gl.style.opacity=0;
     const renderer=new THREE.WebGLRenderer({canvas:gl,alpha:true,antialias:true,preserveDrawingBuffer:true});
     renderer.setPixelRatio(1); renderer.setClearColor(0x000000,0);
+    // a Базис model carries colours matched to the B3D viewer, which works in sRGB with filmic tone
+    if(bz){ renderer.outputEncoding=THREE.sRGBEncoding; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.15; }
     const scene=new THREE.Scene(), camera=new THREE.Camera();
     const root=new THREE.Group(); root.matrixAutoUpdate=false; scene.add(root);
     const fit=new THREE.Group(); fit.rotation.x=Math.PI/2; root.add(fit);
-    const view=new EC_CABINET(model,S,finish,M.makeCurve); fit.add(view.root);
+    const view=makeView(); fit.add(view.root);
     const Wm=S.W/1000, Dm=S.D/1000;
     const shadow=new THREE.Mesh(new THREE.PlaneGeometry(Wm+0.16,Dm+0.2),new THREE.MeshBasicMaterial({color:0x000000,transparent:true,opacity:.2,depthWrite:false}));
     shadow.rotation.x=-Math.PI/2; shadow.position.y=0.002; shadow.raycast=()=>{}; fit.add(shadow);
@@ -1455,6 +1959,7 @@ function smoothing(minCut,beta){
         fp.pid=h.object.userData.pid; selBox.show(view.partBox(fp.pid),{pad:2,noDims:true}); renderFin(); return;
       }
       if(mode==='meas'){ if(h) measureHit(h); else toast(measWhat==='niche'?'Нажмите в пустое место шкафа':'Нажмите на деталь'); return; }
+      if(bz){ if(h){ const b=view.partBox(h.object.userData.pid); if(b){ selBox.show(b,{pad:1.5}); showCard(b.name,`${b.dims.map(fmt).join(' × ')} мм`); } } else { selBox.clear(); hideCard(); } return; }
       if(h&&h.object.userData.mov){ view.toggle(h.object.userData.mov); setTimeout(updDoorsBtn,0); }
       else if(h) toast('Нажмите на дверь или ящик');
     });
