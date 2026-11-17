@@ -74,6 +74,9 @@ model-viewer [slot="ar-button"]{display:none}
 .cam-top .bar{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .cam-status{padding:9px 13px;min-width:0;font-size:14px;font-weight:500}
 .cam-x{width:44px;height:44px;font-size:18px;flex:none;cursor:pointer}
+.cam-x.rec{color:#ff5a4f;font-size:20px}.cam-x.rec.on{background:#ff5a4f;color:#fff}
+.recp{margin-top:8px;padding:12px;display:grid;gap:10px;pointer-events:auto}.recp p{margin:0;font-size:14px}
+.recb{display:grid;grid-template-columns:1fr 1fr;gap:8px}.recb .btn.ghost{color:#fff;border-color:rgba(255,255,255,.45)}.recb .btn{min-height:42px;font-size:14px}.recb #recSend{grid-column:1/-1}
 .mcard{display:flex;align-items:center;gap:10px;padding:10px 8px 10px 13px;justify-self:start;max-width:100%}
 .mcard .mt{min-width:0}
 .mcard .mt b{display:block;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -166,7 +169,8 @@ body.bz #finBtn,body.bz #pgOpen,body.bz #tFin,body.bz #measSeg [data-m="niche"]{
   <canvas id="camBg"></canvas><canvas id="camGl"></canvas>
   <div id="dimLayer"></div>
   <div class="cam-top">
-    <div class="bar"><span class="cam-status glass" id="camStatus" role="status">Наведите камеру на лист</span><button type="button" class="cam-x glass" id="camClose" aria-label="Закрыть камеру">✕</button></div>
+    <div class="bar"><span class="cam-status glass" id="camStatus" role="status">Наведите камеру на лист</span><button type="button" class="cam-x glass rec" id="camRec" aria-label="Записать пробу для настройки">●</button><button type="button" class="cam-x glass" id="camClose" aria-label="Закрыть камеру">✕</button></div>
+    <div class="recp glass" id="recPanel" hidden><p id="recText">Проба записана.</p><div class="recb"><button type="button" class="btn" id="recSend">Отправить пробу</button><a class="btn ghost" id="recV" download>Видео</a><a class="btn ghost" id="recJ" download>Датчики</a><button type="button" class="btn ghost" id="recClose">Закрыть</button></div></div>
     <div class="mcard glass" id="mcard" hidden><div class="mt"><b id="mName"></b><span id="mDims"></span></div><button type="button" id="mClose" aria-label="Убрать замер">✕</button></div>
   </div>
   <div class="toast glass" id="camToast" hidden></div>
@@ -832,6 +836,19 @@ T.Tracker.prototype.process=function(img,scale,W,H,size,up,ox,oy){
   this.prev=pose;
   return {fe:fe,R:pose.R,t:pose.t,err:pose.err,f:this.f,fKnown:!!this.fSet,fLocked:!!this.fLocked,corners:rc.map(p=>({x:p.x/scale+ox,y:p.y/scale+oy})),per};
 };
+/* Position only, when the turn R is already known (from the motion sensors): each picture point gives two equations
+   linear in t. Much steadier than the full pose from a small or distant sheet. pts3: plane points [X,Y]; pts2: pixels
+   from the picture centre. Returns t or null. */
+T.solveT=function(R,f,pts3,pts2,w){
+  const A=[[0,0,0],[0,0,0],[0,0,0]], b=[0,0,0];
+  for(let i=0;i<pts3.length;i++){
+    const X=pts3[i][0], Y=pts3[i][1], u=pts2[i][0], v=pts2[i][1], k=w?w[i]:1;
+    const r1=R[0]*X+R[1]*Y, r2=R[3]*X+R[4]*Y, r3=R[6]*X+R[7]*Y;
+    for(const [row,rhs] of [[[f,0,-u],u*r3-f*r1],[[0,f,-v],v*r3-f*r2]])
+      for(let a=0;a<3;a++){ b[a]+=k*row[a]*rhs; for(let c=0;c<3;c++) A[a][c]+=k*row[a]*row[c]; }
+  }
+  const t=solve(A,b); return t&&t[2]>0?t:null;
+};
 // marker → three.js camera space (y up, looking down −z), column-major 4×4
 T.toThree=function(R,t){ return [R[0],-R[3],-R[6],0, R[1],-R[4],-R[7],0, R[2],-R[5],-R[8],0, t[0],-t[1],-t[2],1]; };
 
@@ -952,6 +969,7 @@ P.estimate=function(f,up,prev){
   const ok=J.motion_estimator.ransac(new J.ransac_params_t(4,thr,0.5,0.995),new J.motion_model.homography2d(),from,to,n,model,mask,600);
   if(!ok) return null;
   let inl=0; for(let i=0;i<n;i++) inl+=mask.data[i];
+  this._agree=Array.from(mask.data.subarray(0,n));
   if(inl<MINP||inl<0.45*n) return null;
   // points that keep disagreeing are not on the floor: drop them
   let m=0;
@@ -967,8 +985,83 @@ P.estimate=function(f,up,prev){
   if(pose.err>4/this.k) return null;
   pose.inl=inl; return pose;
 };
+/* Camera position from the floor points with the turn R known (motion sensors); only points the last fit agreed with. */
+P.position=function(R,f){
+  if(!this.fresh||this.n<MINP) return null;
+  const pts3=[],pts2=[];
+  for(let i=0;i<this.n;i++){ if(this.miss[i]) continue; pts3.push([this.fl[2*i],this.fl[2*i+1]]); pts2.push(this._full(this.xy[2*i],this.xy[2*i+1])); }
+  if(pts3.length<MINP) return null;
+  let t=T.solveT(R,f,pts3,pts2); if(!t) return null;
+  // one round of dropping points far from the fit, then solve again
+  const res=pts3.map(([X,Y],i)=>{ const x=R[0]*X+R[1]*Y+t[0], y=R[3]*X+R[4]*Y+t[1], z=R[6]*X+R[7]*Y+t[2]; return Math.hypot(f*x/z-pts2[i][0],f*y/z-pts2[i][1]); });
+  const lim=Math.max(3/this.k,2.5*res.slice().sort((a,b)=>a-b)[res.length>>1]);
+  const k3=[],k2=[]; res.forEach((e,i)=>{ if(e<=lim){ k3.push(pts3[i]); k2.push(pts2[i]); } });
+  if(k3.length>=MINP) t=T.solveT(R,f,k3,k2)||t;
+  return t;
+};
 root.EC_FLOOR=FloorTrack;
 if(typeof module!=='undefined') module.exports=FloorTrack;
+})(typeof window!=='undefined'?window:globalThis);
+
+/* EasyCab motion sensors for the sheet mode.
+   The phone's own orientation (gyroscope + accelerometer, as the browser reports it in «deviceorientation») is smooth
+   and does not blur or get lost when the phone turns. The camera picture knows where the sheet is but jitters and
+   loses it on fast turns. So: the turn of the camera comes from the sensors, the picture only slowly corrects the
+   sensors' drift and gives the position.
+   Frames: «dev» — the sensors' own world (fixed, but turned arbitrarily against the room); «marker» — the sheet's world.
+   Quaternions are three.js camera orientations (x right, y up, looking down −z). */
+(function(root){
+'use strict';
+const D2R=Math.PI/180;
+function Fusion(){
+  this.buf=[];           // {t, q}: camera orientation in the sensors' world, by time (performance.now, ms)
+  this.off=null;         // marker world ← sensors' world (THREE.Quaternion), learnt from the picture
+  this.lastT=0; this.n=0;
+  this._e=new THREE.Euler(); this._q1=new THREE.Quaternion(-Math.sqrt(0.5),0,0,Math.sqrt(0.5)); this._q0=new THREE.Quaternion(); this._z=new THREE.Vector3(0,0,1);
+}
+const P=Fusion.prototype;
+// one reading of «deviceorientation» (degrees) and the screen's turn (degrees), at time t
+P.push=function(t,alpha,beta,gamma,orient){
+  if(alpha==null||beta==null||gamma==null) return;
+  const q=new THREE.Quaternion();
+  this._e.set(beta*D2R,alpha*D2R,-gamma*D2R,'YXZ'); q.setFromEuler(this._e);
+  q.multiply(this._q1);                                     // camera looks out of the back of the phone
+  q.multiply(this._q0.setFromAxisAngle(this._z,-(orient||0)*D2R));
+  const b=this.buf; if(b.length&&b[b.length-1].q.dot(q)<0) q.set(-q.x,-q.y,-q.z,-q.w);
+  b.push({t,q}); if(b.length>240) b.splice(0,b.length-240);
+  this.lastT=t; this.n++;
+};
+P.alive=function(now){ return this.n>5&&now-this.lastT<400; };
+// orientation at time t (between two readings: interpolated; after the last: the last)
+P.at=function(t,out){
+  const b=this.buf; out=out||new THREE.Quaternion(); if(!b.length) return null;
+  if(t>=b[b.length-1].t) return out.copy(b[b.length-1].q);
+  if(t<=b[0].t) return out.copy(b[0].q);
+  let i=b.length-1; while(i>0&&b[i-1].t>t) i--;
+  const a=b[i-1], c=b[i], k=(t-a.t)/Math.max(1e-6,c.t-a.t);
+  return out.copy(a.q).slerp(c.q,k);
+};
+/* The picture saw the camera turned qv (marker world) at time t.
+   Returns the angle (degrees) between the picture and the sensors' prediction, before learning from it.
+   gain: how much of the difference to take now (small = smooth; the sensors' drift is slow). */
+P.correct=function(qv,t,gain){
+  const qd=this.at(t); if(!qd) return 0;
+  const off=qv.clone().multiply(qd.clone().invert());
+  if(!this.off){ this.off=off; return 0; }
+  const pred=this.off.clone().multiply(qd), ang=2*Math.acos(Math.min(1,Math.abs(pred.dot(qv))))/D2R;
+  if(this.off.dot(off)<0) off.set(-off.x,-off.y,-off.z,-off.w);
+  this.off.slerp(off,gain); this.off.normalize();
+  return ang;
+};
+// predicted angle between the picture's reading and the sensors, without learning from it
+P.disagree=function(qv,t){
+  const qd=this.at(t); if(!qd||!this.off) return 0;
+  const pred=this.off.clone().multiply(qd); return 2*Math.acos(Math.min(1,Math.abs(pred.dot(qv))))/D2R;
+};
+// camera orientation in the marker world at time t
+P.orient=function(t,out){ const qd=this.at(t); if(!qd||!this.off) return null; return (out||new THREE.Quaternion()).copy(this.off).multiply(qd); };
+P.reset=function(){ this.off=null; };
+root.EC_FUSE=Fusion;
 })(typeof window!=='undefined'?window:globalThis);
 
 /* EasyCab finishes: a library of board decors, ready-made sets, and three.js materials for them.
@@ -2075,8 +2168,34 @@ function smoothing(minCut,beta){
     const floor=window.jsfeat&&window.EC_FLOOR?new EC_FLOOR():null, fcan=document.createElement('canvas'), fctx=fcan.getContext('2d',{willReadFrequently:true});
     let detLong=1280, avg=0, shift=0, lastSeen=0, seenOnce=false, fProj=0, raf=0, stopped=false, last=null, paused=false;
     let mode=null, measWhat='part', toastT=0;
-    const tune=Object.assign({pos:[1.2,6],rot:[0.9,2.5]},window.__ecTune||{});
-    const fPos=smoothing(tune.pos[0],tune.pos[1]), fRot=smoothing(tune.rot[0],tune.rot[1]);
+    /* Motion sensors: the camera's turn comes from them, the picture corrects their slow drift (see fusion.js).
+       frameT: when the frame now on screen was taken — the sensors are read for that moment, so the model turns
+       together with the picture, not ahead of it. */
+    const fuse=window.EC_FUSE?new EC_FUSE():null;
+    const replay=opts.replay||null;
+    const scr=()=>(screen.orientation&&screen.orientation.angle)||window.orientation||0;
+    const rec={on:false,log:null};
+    const onOri=e=>{ const t=performance.now(); if(fuse&&!replay) fuse.push(t,e.alpha,e.beta,e.gamma,scr()); if(rec.on) rec.log.ori.push([+t.toFixed(2),e.alpha,e.beta,e.gamma,scr()]); };
+    if(fuse&&!replay) window.addEventListener('deviceorientation',onOri);
+    let frameT=0;
+    if(src===video&&video.requestVideoFrameCallback){
+      const vf=(nw,md)=>{ if(stopped) return;
+        if(!replay) frameT=md.captureTime||((md.presentationTime||nw)-tuneLat());
+        if(rec.on) rec.log.frames.push([+nw.toFixed(2),+md.mediaTime.toFixed(4),md.captureTime?+md.captureTime.toFixed(2):null,md.presentationTime?+md.presentationTime.toFixed(2):null]);
+        video.requestVideoFrameCallback(vf); };
+      video.requestVideoFrameCallback(vf);
+    }
+    const tuneLat=()=>(window.__ecTune&&window.__ecTune.lat!=null)?window.__ecTune.lat:40;
+    let rejects=0, cpos=new THREE.Vector3(), cq=new THREE.Quaternion(), useFuse=false;
+    // the camera's turn from the sensors as the tracker's R (marker → camera, x right, y down, z forward), row-major
+    const _q=new THREE.Quaternion(), _m=new THREE.Matrix4();
+    function fusedR(t){
+      if(!fuse.orient(t,_q)) return null;
+      _m.makeRotationFromQuaternion(_q.invert()); const e=_m.elements;   // three: marker → camera (column-major)
+      return [e[0],e[4],e[8], -e[1],-e[5],-e[9], -e[2],-e[6],-e[10]];
+    }
+    const tune=Object.assign({pos:[1.2,6],rot:[0.9,2.5],cpos:[0.6,3]},window.__ecTune||{});
+    const fPos=smoothing(tune.pos[0],tune.pos[1]), fRot=smoothing(tune.rot[0],tune.rot[1]), fCam=smoothing(tune.cpos[0],tune.cpos[1]);
     const fKey='ecFocal:'+Math.max(W,H)+'x'+Math.min(W,H);
     try{ const fv=parseFloat(localStorage.getItem(fKey)); if(fv>0) tracker.useFocal(fv,W,H); }catch(e){}
     let fSaved=false;
@@ -2172,6 +2291,14 @@ function smoothing(minCut,beta){
       const now=performance.now();
       if(!paused){
         if(src===video&&video.readyState<2) return;
+        if(replay){
+          // a recorded try: one video frame at a time; the sensors are fed up to the moment that frame was taken
+          if(video.seeking) return;
+          if(video.currentTime>=video.duration-0.04){ if(!replay.done){ replay.done=true; if(replay.onEnd) replay.onEnd(); } return; }
+          const c=replay.capAt(video.currentTime);
+          while(replay.i<replay.log.ori.length&&replay.log.ori[replay.i][0]<=c+5){ const o=replay.log.ori[replay.i++]; fuse&&fuse.push(o[0]-c+now,o[1],o[2],o[3],o[4]); }
+          frameT=now;
+        } else if(!(src===video&&video.requestVideoFrameCallback)) frameT=now-(src===video?tuneLat():0);
         const d=dims(); if(d[0]!==W||d[1]!==H){ W=d[0]; H=d[1]; layout(); }
         wctx.drawImage(src,0,0,W,H);
         if(floor){ const fk=Math.min(1,640/Math.max(W,H)), fw=Math.round(W*fk), fh=Math.round(H*fk);
@@ -2205,7 +2332,7 @@ function smoothing(minCut,beta){
             floor.check(r.R,r.t,r.f);
             if(floor.n<120||floor.frames-floor.lastSeed>15){ const xs=r.corners.map(p=>p.x-W/2), ys=r.corners.map(p=>p.y-H/2), pad=0.25*(Math.max(...xs)-Math.min(...xs));
               floor.seed(r.R,r.t,r.f,[Math.min(...xs)-pad,Math.min(...ys)-pad,Math.max(...xs)+pad,Math.max(...ys)+pad]); }
-          } else if(seenOnce&&floor.n>=12&&(!r||floor.n>=30)){
+          } else if(seenOnce&&floor.n>=12&&!r){
             const fp=floor.estimate(tracker.f,null,tracker.prev);
             if(fp){
               tracker.prev=fp;
@@ -2216,11 +2343,39 @@ function smoothing(minCut,beta){
             }
           }
         }
+        /* With the sensors: the camera's position comes from the picture (smoothed), its turn from the sensors.
+           A reading of the picture that disagrees with the sensors' turn is a misreading (blur, a wrong floor point)
+           and is thrown away instead of tipping the model over. */
+        useFuse=!!(fuse&&(replay||fuse.alive(now)));
+        if(useFuse&&r){
+          tm.fromArray(EC_TRACK.toThree(r.R,r.t)).invert(); tm.decompose(tp,tq,ts);
+          const ang=fuse.disagree(tq,frameT), gate=r.floor?7:15;
+          if(fuse.off&&ang>gate){ r=null; if(++rejects>20){ fuse.reset(); rejects=0; } }
+          else {
+            rejects=0;
+            const long=Math.max(W,H);
+            // the sensors' slow drift is corrected only from a clear view of the sheet; the floor never turns the model
+            fuse.correct(tq,frameT,r.floor?0:r.per>0.16*long?0.1:r.per>0.09*long?0.04:0.01);
+            // the position, with the turn taken from the sensors: steadier than the picture's own turn
+            const Rf=fusedR(frameT);
+            let tt=null;
+            if(Rf&&r.floor) tt=floor.position(Rf,r.f);
+            else if(Rf) tt=EC_TRACK.solveT(Rf,r.f,EC_TRACK.corners3(size),r.corners.map(p=>[p.x-W/2,p.y-H/2]));
+            if(tt){ tp.set(-(Rf[0]*tt[0]+Rf[3]*tt[1]+Rf[6]*tt[2]),-(Rf[1]*tt[0]+Rf[4]*tt[1]+Rf[7]*tt[2]),-(Rf[2]*tt[0]+Rf[5]*tt[1]+Rf[8]*tt[2])); }
+            if(!seenOnce||now-lastSeen>1500||tp.distanceTo(cpos)>0.5) fCam.reset();
+            cpos.copy(fCam.vec(tp,now));
+          }
+        }
         // The picture and the cabinet must come from the same frame. If the sheet slipped out of one frame,
         // keep showing the previous picture for a moment instead of letting the room slide under a frozen cabinet.
-        if(r||!seenOnce||now-lastSeen>250) bctx.drawImage(work,0,0);
+        if(useFuse||r||!seenOnce||now-lastSeen>250) bctx.drawImage(work,0,0);
         if(r&&r.fLocked&&!fSaved){ fSaved=true; try{ localStorage.setItem(fKey,String(r.f)); }catch(e){} }
-        if(r){
+        if(useFuse&&seenOnce&&fuse.orient(frameT,cq)){
+          if(r&&Math.abs(r.f-fProj)>0.5) setProjection(r.f);
+          tm.compose(cpos,cq,ts.set(1,1,1)).invert(); root.matrix.copy(tm); root.matrixWorldNeedsUpdate=true;
+        }
+        if(r&&useFuse){ if(!seenOnce){ seenOnce=true; cpos.copy(tp); fuse.orient(frameT,cq); tm.compose(cpos,cq,ts.set(1,1,1)).invert(); root.matrix.copy(tm); root.matrixWorldNeedsUpdate=true; if(Math.abs(r.f-fProj)>0.5) setProjection(r.f); } lastSeen=now; last=r; }
+        if(r&&!useFuse){
           if(Math.abs(r.f-fProj)>0.5) setProjection(r.f);
           tm.fromArray(EC_TRACK.toThree(r.R,r.t)); tm.decompose(tp,tq,ts);
           if(!seenOnce||now-lastSeen>700||tp.distanceTo(pos)>0.35||quat.angleTo(tq)>0.5){ fPos.reset(); fRot.reset(); }
@@ -2228,16 +2383,19 @@ function smoothing(minCut,beta){
           root.matrix.compose(pos,quat,ts.set(1,1,1)); root.matrixWorldNeedsUpdate=true;
           lastSeen=now; seenOnce=true; last=r;
         }
-        const fresh=seenOnce&&now-lastSeen<700;
+        const fresh=seenOnce&&now-lastSeen<(useFuse?3000:700);
         gl.style.opacity=seenOnce?(fresh?1:0.35):0;
         let msg;
         if(!seenOnce) msg='Наведите камеру на лист';
         else if(!fresh) msg='Лист потерян — верните его в кадр или нажмите «Пауза»';
+        else if(useFuse&&now-lastSeen>400) msg='Держу по датчикам — наведите камеру на лист или пол';
         else if(last.floor) msg='Держу по полу: лист можно не видеть. Двигайтесь плавно';
         else { const dist=Math.hypot(last.t[0],last.t[1],last.t[2]); msg=last.per<0.09*Math.max(W,H)&&!(floor&&floor.n>=30)?'Лист далеко: подойдите ближе или распечатайте его на А3':`Лист найден · до него ${dist.toFixed(1).replace('.',',')} м`; }
         if(Math.max(W,H)<1280&&seenOnce&&!(last&&last.floor)) msg=`Камера даёт мало точек (${W}×${H}), шкаф может дрожать. Помогут лист А3 или «Пауза»`;
         if(status.textContent!==msg) status.textContent=msg;
-        if(debug&&last) diag.textContent=`${W}×${H} · det ${dw}×${dh} ${avg.toFixed(0)} мс · f ${last.f.toFixed(0)}${last.fKnown?'':' (по умолч.)'} · err ${last.err.toFixed(2)} · пол ${floor?floor.n:'-'}${last.floor?' ✓':''}`;
+        if(replay&&replay.onFrame) replay.onFrame({t:video.currentTime,useFuse,seen:seenOnce,fresh,floor:!!(last&&last.floor),rejects,got:!!r,M:root.matrix.elements.slice(),f:fProj});
+        if(replay) video.currentTime=Math.min(video.duration,video.currentTime+replay.step);
+        if(debug&&last) diag.textContent=`${W}×${H} · det ${dw}×${dh} ${avg.toFixed(0)} мс · f ${last.f.toFixed(0)}${last.fKnown?'':' (по умолч.)'} · err ${last.err.toFixed(2)} · пол ${floor?floor.n:'-'}${last.floor?' ✓':''} · датч ${useFuse?'да':'нет'} ${rejects}`;
       } else {
         gl.style.opacity=seenOnce?1:0;
         const msg='Пауза: картинка остановлена, шкаф можно открывать и мерить';
@@ -2272,20 +2430,56 @@ function smoothing(minCut,beta){
       },'image/jpeg',0.92);
     };
     const stop=()=>{
-      stopped=true; cancelAnimationFrame(raf); if(stream) stream.getTracks().forEach(t=>t.stop()); video.srcObject=null;
+      stopped=true; cancelAnimationFrame(raf); window.removeEventListener('deviceorientation',onOri);
+      if(mr&&mr.state!=='inactive') try{ mr.stop(); }catch(e){}
+      if(stream) stream.getTracks().forEach(t=>t.stop()); video.srcObject=null;
       meas.clear(); selBox.clear(); hideCard(); if(!$('fin').hidden){ fp.onClose=null; $('fin').hidden=true; }
       fp.onChange=null; fp.onZone=null; fp.onClose=null;
       renderer.dispose(); cam.hidden=true; run=null;
       if(glbDirty){ glbDirty=false; rebuildGLB(); }
     };
     $('camClose').onclick=stop;
-    run={stop,view,pick,project,get floor(){return floor;},get tracker(){return tracker;},get last(){return last;},get seen(){return seenOnce;},get mode(){return mode;},get paused(){return paused;}};
+    /* «●» records a try for tuning: the camera video as it is plus the sensors and frame times, 15 s at most. */
+    let mr=null, recTimer=0, recFiles=null;
+    $('camRec').onclick=()=>{
+      if(rec.on){ mr&&mr.state!=='inactive'&&mr.stop(); return; }
+      if(!stream||!window.MediaRecorder){ toast('Запись здесь недоступна'); return; }
+      const types=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4'], type=types.find(t=>MediaRecorder.isTypeSupported(t))||'';
+      const chunks=[]; try{ mr=new MediaRecorder(stream,type?{mimeType:type,videoBitsPerSecond:12e6}:{videoBitsPerSecond:12e6}); }catch(e){ toast('Запись не запустилась'); return; }
+      rec.log={meta:{v:1,W,H,f:tracker.f,fLocked:!!tracker.fLocked,size,ua:navigator.userAgent,scr:scr(),lat:tuneLat(),t0:performance.now(),dpr:devicePixelRatio,type},ori:[],frames:[]};
+      mr.onstart=()=>{ rec.log.meta.recStart=performance.now(); };
+      mr.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+      mr.onstop=()=>{
+        rec.on=false; clearTimeout(recTimer); $('camRec').classList.remove('on'); $('camRec').textContent='●';
+        rec.log.meta.t1=performance.now(); rec.log.meta.f1=tracker.f;
+        const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-'), ext=(mr.mimeType||type).includes('mp4')?'mp4':'webm';
+        const vb=new Blob(chunks,{type:mr.mimeType||type||'video/webm'}), jb=new Blob([JSON.stringify(rec.log)],{type:'application/json'});
+        recFiles=[new File([vb],`proba-${stamp}.${ext}`,{type:vb.type}),new File([jb],`proba-${stamp}.json`,{type:'application/json'})];
+        $('recV').href=URL.createObjectURL(vb); $('recV').download=recFiles[0].name; $('recJ').href=URL.createObjectURL(jb); $('recJ').download=recFiles[1].name;
+        $('recText').textContent=`Проба записана: ${(vb.size/1048576).toFixed(1)} МБ видео и датчики (${rec.log.ori.length} показаний). Отправьте оба файла в чат.`;
+        $('recPanel').hidden=false;
+      };
+      rec.on=true; mr.start(500); $('camRec').classList.add('on'); $('camRec').textContent='■';
+      toast('Идёт запись пробы: наведите на лист, отойдите, поверните телефон. До 15 секунд');
+      recTimer=setTimeout(()=>{ mr&&mr.state!=='inactive'&&mr.stop(); },15000);
+    };
+    $('recSend').onclick=async()=>{
+      if(!recFiles) return;
+      try{ if(navigator.canShare&&navigator.canShare({files:recFiles})){ await navigator.share({files:recFiles,title:'Проба AR'}); return; } }catch(e){ if(e&&e.name==='AbortError') return; }
+      $('recText').textContent='Отправка отсюда не работает: сохраните «Видео» и «Датчики» и приложите их в чат.';
+    };
+    $('recClose').onclick=()=>{ $('recPanel').hidden=true; };
+    run={stop,view,pick,project,get fuse(){return fuse;},get useFuse(){return useFuse;},get root(){return root;},get frameT(){return frameT;},get floor(){return floor;},get tracker(){return tracker;},get last(){return last;},get seen(){return seenOnce;},get mode(){return mode;},get paused(){return paused;}};
     try{ if(navigator.wakeLock) navigator.wakeLock.request('screen').catch(()=>{}); }catch(e){}
     frame();
     return run;
   }
   try{ const v=parseInt(localStorage.getItem('ecMkSize'),10); if(v>=40&&v<=1000) $('mkSize').value=v; }catch(e){}
-  $('mkStart').addEventListener('click',()=>startSheet());
+  $('mkStart').addEventListener('click',()=>{
+    // iPhone asks once for the motion sensors, and only from a tap
+    try{ if(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission==='function') DeviceOrientationEvent.requestPermission().catch(()=>{}); }catch(e){}
+    startSheet();
+  });
   window.__ecSheet={start:startSheet,sheetMode,get run(){return run;},get finish(){return finish;}};
 })();
 })();
