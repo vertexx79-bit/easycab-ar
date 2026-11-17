@@ -1637,8 +1637,9 @@ P.partBox=function(pid){
 P.toLocal=function(v){ return this.inner.worldToLocal(v.clone()); };
 
 /* Link payload: 'BZ85', u16 name length, the name in UTF-8, then a zlib stream of the model alone */
-B3DView.pack=async function(fileBytes,name,inflate){
-  const res=B.parse(fileBytes,inflate), body=B.compactBody(res);
+B3DView.pack=async function(fileBytes,name,inflate){ return B3DView.packRes(B.parse(fileBytes,inflate),name); };
+B3DView.packRes=async function(res,name){
+  const body=B.compactBody(res);
   const cs=new Blob([body]).stream().pipeThrough(new CompressionStream('deflate'));
   const z=new Uint8Array(await new Response(cs).arrayBuffer()), nm=new TextEncoder().encode(String(name||'').slice(0,80));
   const out=new Uint8Array(6+nm.length+z.length); out.set([66,90,56,53],0); new DataView(out.buffer).setUint16(4,nm.length,true); out.set(nm,6); out.set(z,6+nm.length);
@@ -1658,7 +1659,9 @@ const F=window.EC_FINISH;
 /* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
 function b64u(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
 async function readState(){
-  const h=location.hash.slice(1);
+  // the model comes after # (links opened inside a browser) or as ?z= / ?j= / ?m= (links that ask for Chrome by name)
+  let h=location.hash.slice(1);
+  if(!h){ const q=new URLSearchParams(location.search); for(const k of ['z','j','b']) if(q.get(k)){ h=k+q.get(k); break; } }
   try{
     if(h[0]==='z'){ const ds=new Blob([b64u(h.slice(1))]).stream().pipeThrough(new DecompressionStream('deflate-raw')); return JSON.parse(await new Response(ds).text()); }
     if(h[0]==='j') return JSON.parse(new TextDecoder().decode(b64u(h.slice(1))));
