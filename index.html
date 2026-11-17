@@ -1664,7 +1664,7 @@ root.EC_B3DVIEW=B3DView;
 const F=window.EC_FINISH;
 
 /* state comes in the link: #z<base64url of deflate-raw JSON> or #j<base64url JSON>; no hash — the example wardrobe */
-const MODEL_STORE='';   // address of the EasyCab model storage (Cloudflare Worker), set at build time
+const MODEL_STORE='https://round-snow-441f.vertexx79.workers.dev';   // address of the EasyCab model storage (Cloudflare Worker), set at build time
 function b64u(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Uint8Array.from(atob(s),c=>c.charCodeAt(0)); }
 async function readState(){
   // the model comes after # (links opened inside a browser) or as ?z= / ?j= / ?m= (links that ask for Chrome by name)
