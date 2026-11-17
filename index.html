@@ -844,6 +844,133 @@ root.EC_TRACK=T;
 if(typeof module!=='undefined') module.exports=T;
 })(typeof window!=='undefined'?window:globalThis);
 
+/* EasyCab floor tracking: keeps the model in place when the printed sheet is too small, blurred or out of the frame.
+   While the sheet is seen, points of the floor's own pattern (tiles, wood, carpet, specks) are picked around it and
+   their place on the floor is worked out from the sheet. From then on these points are followed from frame to frame
+   (optical flow); since they all lie on one plane, their picture gives the camera's position on its own.
+   Points that are not on the floor (walls, furniture) do not fit that plane and are thrown out.
+   Needs jsfeat and EC_TRACK. Coordinates: as EC_TRACK — marker frame in metres, picture in full-frame pixels
+   measured from the centre. */
+(function(root){
+'use strict';
+const T=root.EC_TRACK;
+const MAXP=220, MINP=12, CELL=20;
+
+function FloorTrack(){
+  this.w=0; this.h=0; this.k=1; this.n=0;
+  this.xy=new Float32Array(MAXP*2); this.nxy=new Float32Array(MAXP*2); this.st=new Uint8Array(MAXP);
+  this.fl=new Float64Array(MAXP*2);   // floor X, Y of every point (metres)
+  this.miss=new Uint8Array(MAXP);      // how many fits in a row the point disagreed with
+  this.frames=0; this.lastSeed=-99;
+}
+const P=FloorTrack.prototype;
+P._alloc=function(w,h){
+  const J=root.jsfeat, t=J.U8_t|J.C1_t;
+  this.w=w; this.h=h;
+  this.pa=new J.pyramid_t(4); this.pa.allocate(w,h,t);
+  this.pb=new J.pyramid_t(4); this.pb.allocate(w,h,t);
+  this.corners=[]; for(let i=0;i<w*h/8;i++) this.corners.push(new J.keypoint_t(0,0,0,0));
+  this.n=0;
+};
+/* A new frame: img is ImageData of the frame shrunk by k (k = small px per full px); W, H are the full frame size. */
+P.frame=function(img,k,W,H){
+  const J=root.jsfeat;
+  if(img.width!==this.w||img.height!==this.h) this._alloc(img.width,img.height);
+  this.k=k; this.W=W; this.H=H; this.frames++;
+  const t=this.pa; this.pa=this.pb; this.pb=t;               // pb = previous frame, pa = this one
+  J.imgproc.grayscale(img.data,img.width,img.height,this.pa.data[0]);
+  this.pa.build(this.pa.data[0],true);
+  this.fresh=false;
+  if(!this.n||this.frames<2) return;
+  J.optical_flow_lk.track(this.pb,this.pa,this.xy,this.nxy,this.n,17,20,this.st,0.01,0.0008);
+  // keep the points that were found again, still inside the picture
+  let m=0;
+  for(let i=0;i<this.n;i++){
+    const x=this.nxy[2*i], y=this.nxy[2*i+1];
+    if(!this.st[i]||x<4||y<4||x>this.w-5||y>this.h-5) continue;
+    this.xy[2*m]=x; this.xy[2*m+1]=y; this.fl[2*m]=this.fl[2*i]; this.fl[2*m+1]=this.fl[2*i+1]; this.miss[m]=this.miss[i]; m++;
+  }
+  this.n=m; this.fresh=true;
+};
+P.reset=function(){ this.n=0; };
+// small-image point → full-frame centred pixel
+P._full=function(x,y){ return [x/this.k-this.W/2, y/this.k-this.H/2]; };
+// where a picture point lies on the floor, seen from pose (R, t) with focal f; null if the ray misses the floor nearby
+function onFloor(R,t,f,u,v){
+  const d=[u/f,v/f,1];
+  // camera centre C = −Rᵀt, ray direction D = Rᵀd (R row-major)
+  const C=[-(R[0]*t[0]+R[3]*t[1]+R[6]*t[2]),-(R[1]*t[0]+R[4]*t[1]+R[7]*t[2]),-(R[2]*t[0]+R[5]*t[1]+R[8]*t[2])];
+  const D=[R[0]*d[0]+R[3]*d[1]+R[6]*d[2],R[1]*d[0]+R[4]*d[1]+R[7]*d[2],R[2]*d[0]+R[5]*d[1]+R[8]*d[2]];
+  const len=Math.hypot(D[0],D[1],D[2]);
+  if(!(C[2]>0.05)||D[2]/len>-0.12) return null;   // the camera must be above the floor, and the ray must go down clearly
+  const l=-C[2]/D[2], X=C[0]+D[0]*l, Y=C[1]+D[1]*l;
+  if(Math.hypot(X,Y)>6) return null;
+  return [X,Y];
+}
+/* Add floor points from a known pose (from the sheet, or from the floor itself). skipBox: picture area of the sheet,
+   whose own corners are already followed by the sheet detector and whose print is too regular to follow well. */
+P.seed=function(R,t,f,skipBox){
+  const J=root.jsfeat; if(!this.w) return;
+  const g=this.pa.data[0], occ=new Uint8Array(Math.ceil(this.w/CELL)*Math.ceil(this.h/CELL)), cw=Math.ceil(this.w/CELL);
+  for(let i=0;i<this.n;i++) occ[((this.xy[2*i+1]/CELL)|0)*cw+((this.xy[2*i]/CELL)|0)]=1;
+  J.fast_corners.set_threshold(14);
+  const cnt=J.fast_corners.detect(g,this.corners,8);
+  const list=this.corners.slice(0,cnt).sort((a,b)=>b.score-a.score);
+  for(const c of list){
+    if(this.n>=MAXP) break;
+    const ci=((c.y/CELL)|0)*cw+((c.x/CELL)|0); if(occ[ci]) continue;
+    const [u,v]=this._full(c.x,c.y);
+    if(skipBox&&u>skipBox[0]&&u<skipBox[2]&&v>skipBox[1]&&v<skipBox[3]) continue;
+    const fp=onFloor(R,t,f,u,v); if(!fp) continue;
+    occ[ci]=1;
+    const i=this.n++; this.xy[2*i]=c.x; this.xy[2*i+1]=c.y; this.fl[2*i]=fp[0]; this.fl[2*i+1]=fp[1]; this.miss[i]=0;
+  }
+  this.lastSeed=this.frames;
+};
+/* While the sheet gives a good pose, every point is checked against it: a point that slid off its spot
+   (lost texture, a shadow, part of a wall) no longer lands where its floor place says, and is dropped. */
+P.check=function(R,t,f){
+  if(!this.fresh) return;
+  const tol=Math.max(4,3/this.k); let m=0;
+  for(let i=0;i<this.n;i++){
+    const X=this.fl[2*i], Y=this.fl[2*i+1], x=R[0]*X+R[1]*Y+t[0], y=R[3]*X+R[4]*Y+t[1], z=R[6]*X+R[7]*Y+t[2];
+    const [u,v]=this._full(this.xy[2*i],this.xy[2*i+1]);
+    const bad=!(z>0)||Math.hypot(f*x/z-u,f*y/z-v)>tol;
+    this.miss[i]=bad?this.miss[i]+1:0;
+    if(this.miss[i]>1) continue;
+    this.xy[2*m]=this.xy[2*i]; this.xy[2*m+1]=this.xy[2*i+1]; this.fl[2*m]=this.fl[2*i]; this.fl[2*m+1]=this.fl[2*i+1]; this.miss[m]=this.miss[i]; m++;
+  }
+  this.n=m;
+};
+/* The pose from the floor points alone. Returns {R, t, err, inl} or null when there are too few points that agree. */
+P.estimate=function(f,up,prev){
+  const J=root.jsfeat; if(!this.fresh||this.n<MINP) return null;
+  const n=this.n, from=[], to=[];
+  for(let i=0;i<n;i++){ from.push({x:this.fl[2*i]*1000,y:this.fl[2*i+1]*1000}); const q=this._full(this.xy[2*i],this.xy[2*i+1]); to.push({x:q[0],y:q[1]}); }
+  const model=new J.matrix_t(3,3,J.F32_t|J.C1_t), mask=new J.matrix_t(n,1,J.U8_t|J.C1_t);
+  const thr=Math.max(3,2.2/this.k);
+  const ok=J.motion_estimator.ransac(new J.ransac_params_t(4,thr,0.5,0.995),new J.motion_model.homography2d(),from,to,n,model,mask,600);
+  if(!ok) return null;
+  let inl=0; for(let i=0;i<n;i++) inl+=mask.data[i];
+  if(inl<MINP||inl<0.45*n) return null;
+  // points that keep disagreeing are not on the floor: drop them
+  let m=0;
+  for(let i=0;i<n;i++){
+    this.miss[i]=mask.data[i]?0:this.miss[i]+1;
+    if(this.miss[i]>3) continue;
+    this.xy[2*m]=this.xy[2*i]; this.xy[2*m+1]=this.xy[2*i+1]; this.fl[2*m]=this.fl[2*i]; this.fl[2*m+1]=this.fl[2*i+1]; this.miss[m]=this.miss[i]; m++;
+  }
+  this.n=m;
+  // the homography, applied to a 1 m square, gives four picture corners for the usual pose solver
+  const h=model.data, S=1, pts2=T.corners3(S).map(([X,Y])=>{ X*=1000; Y*=1000; const w=h[6]*X+h[7]*Y+h[8]; return [(h[0]*X+h[1]*Y+h[2])/w,(h[3]*X+h[4]*Y+h[5])/w]; });
+  const pose=T.solvePose(pts2,S,f,up,prev); if(!pose) return null;
+  if(pose.err>4/this.k) return null;
+  pose.inl=inl; return pose;
+};
+root.EC_FLOOR=FloorTrack;
+if(typeof module!=='undefined') module.exports=FloorTrack;
+})(typeof window!=='undefined'?window:globalThis);
+
 /* EasyCab finishes: a library of board decors, ready-made sets, and three.js materials for them.
    A finish is {body, door, drawer, parts:{partId: decorId}} — decor ids from the library below.
    Wood, stone and marble get a drawn texture whose scale is real (one tile ≈ 600 mm), so grain does not stretch on long parts. */
@@ -1812,11 +1939,20 @@ function smoothing(minCut,beta){
   if(/[?&]sheet\b/.test(location.search)) noAR=true;   // ?sheet in the link opens the sheet mode directly
   function builtin(){ btn.hidden=false; tip.hidden=false; mk.hidden=true; }
   function sheetMode(remember){
-    btn.hidden=true; tip.hidden=true; mk.hidden=false; $('mkRetry').hidden=!mv.canActivateAR;
+    btn.hidden=true; tip.hidden=true; mk.hidden=false; $('mkRetry').hidden=true; builtinWorks().then(ok=>{ $('mkRetry').hidden=!ok; });
     if(remember) try{ localStorage.setItem('ecNoAR','1'); }catch(e){}
   }
   let decided=false;
-  mv.addEventListener('load',()=>{ if(decided) return; decided=true; if(mv.canActivateAR&&!noAR) builtin(); else sheetMode(false); });
+  /* Built-in AR that really works here: WebXR on Android (Chrome with Google's AR services), Quick Look on iPhone.
+     Other Android browsers (Yandex, Samsung, Mi…) report AR through Scene Viewer, which cannot open a model made
+     on the page, so the button would do nothing: they get the sheet mode instead. */
+  const IOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  async function builtinWorks(){
+    if(IOS) return !!mv.canActivateAR;
+    if(ex) return !!mv.canActivateAR;
+    try{ return !!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-ar')); }catch(e){ return false; }
+  }
+  mv.addEventListener('load',async()=>{ if(decided) return; decided=true; if(!noAR&&await builtinWorks()) builtin(); else sheetMode(false); });
   $('mkRetry').addEventListener('click',()=>{ try{ localStorage.removeItem('ecNoAR'); }catch(e){} builtin(); });
   let tClick=0, started=false, tracked=false, live=false;
   btn.addEventListener('click',()=>{ tClick=Date.now(); started=false; tracked=false; mv.activateAR(); });
@@ -1896,6 +2032,7 @@ function smoothing(minCut,beta){
     const size=Math.min(1000,Math.max(40,parseFloat($('mkSize').value)||170))/1000;
     try{ localStorage.setItem('ecMkSize',String(Math.round(size*1000))); }catch(e){}
     try{
+      if(!window.jsfeat){ try{ await loadScript('https://cdn.jsdelivr.net/npm/jsfeat@0.0.8/build/jsfeat-min.js'); }catch(e){ console.warn('jsfeat',e); } }
       if(!window.AR){ await loadScript('https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/cv.js'); await loadScript('https://cdn.jsdelivr.net/npm/js-aruco2@2.0.0/src/aruco.js'); }
     }catch(e){ err.textContent='Не удалось загрузить модуль распознавания. Проверьте интернет и попробуйте ещё раз.'; err.hidden=false; return; }
     const video=$('camVideo'); let stream=null, src=opts.source||null;
@@ -1934,6 +2071,8 @@ function smoothing(minCut,beta){
     const sun=new THREE.DirectionalLight(0xffffff,.55); sun.position.set(-1.5,-3,4); root.add(sun); root.add(sun.target);
     const meas=new EC_MEASURE(layer), selBox=new EC_MEASURE(layer);
     const tracker=new EC_TRACK.Tracker(window.AR), dcan=document.createElement('canvas'), dctx=dcan.getContext('2d',{willReadFrequently:true});
+    // floor tracking (needs jsfeat; without it the page works on the sheet alone, as before)
+    const floor=window.jsfeat&&window.EC_FLOOR?new EC_FLOOR():null, fcan=document.createElement('canvas'), fctx=fcan.getContext('2d',{willReadFrequently:true});
     let detLong=1280, avg=0, shift=0, lastSeen=0, seenOnce=false, fProj=0, raf=0, stopped=false, last=null, paused=false;
     let mode=null, measWhat='part', toastT=0;
     const tune=Object.assign({pos:[1.2,6],rot:[0.9,2.5]},window.__ecTune||{});
@@ -2035,6 +2174,9 @@ function smoothing(minCut,beta){
         if(src===video&&video.readyState<2) return;
         const d=dims(); if(d[0]!==W||d[1]!==H){ W=d[0]; H=d[1]; layout(); }
         wctx.drawImage(src,0,0,W,H);
+        if(floor){ const fk=Math.min(1,640/Math.max(W,H)), fw=Math.round(W*fk), fh=Math.round(H*fk);
+          if(fcan.width!==fw||fcan.height!==fh){ fcan.width=fw; fcan.height=fh; }
+          fctx.drawImage(work,0,0,fw,fh); try{ floor.frame(fctx.getImageData(0,0,fw,fh),fw/W,W,H); }catch(e){ if(debug) console.warn(e); } }
         const t0=performance.now(); let r=null, dw=0, dh=0;
         const grab=(x,y,w,h,sc)=>{
           dw=Math.max(8,Math.round(w*sc)); dh=Math.max(8,Math.round(h*sc));
@@ -2054,6 +2196,26 @@ function smoothing(minCut,beta){
           const dt=performance.now()-t0; avg=avg?avg*0.85+dt*0.15:dt;
           if(avg<45&&detLong<Math.max(W,H)) detLong=Math.min(Math.max(W,H),detLong+320); else if(avg>110&&detLong>960) detLong-=160;
         }
+        /* The sheet gives the pose and teaches the floor points where they lie; without the sheet (too far, blurred,
+           out of the frame) the floor points alone keep the model in place. A sheet seen very small is less steady than
+           the floor around it, so then the floor wins. */
+        if(floor){
+          const long=Math.max(W,H);
+          if(r&&r.per>0.09*long&&r.err<3){
+            floor.check(r.R,r.t,r.f);
+            if(floor.n<120||floor.frames-floor.lastSeed>15){ const xs=r.corners.map(p=>p.x-W/2), ys=r.corners.map(p=>p.y-H/2), pad=0.25*(Math.max(...xs)-Math.min(...xs));
+              floor.seed(r.R,r.t,r.f,[Math.min(...xs)-pad,Math.min(...ys)-pad,Math.max(...xs)+pad,Math.max(...ys)+pad]); }
+          } else if(seenOnce&&floor.n>=12&&(!r||floor.n>=30)){
+            const fp=floor.estimate(tracker.f,null,tracker.prev);
+            if(fp){
+              tracker.prev=fp;
+              const corners=EC_TRACK.corners3(size).map(([X,Y])=>{ const R=fp.R,t=fp.t, x=R[0]*X+R[1]*Y+t[0], y=R[3]*X+R[4]*Y+t[1], z=R[6]*X+R[7]*Y+t[2]; return {x:tracker.f*x/z+W/2,y:tracker.f*y/z+H/2}; });
+              const per=corners.reduce((a,p,i)=>a+Math.hypot(p.x-corners[(i+1)%4].x,p.y-corners[(i+1)%4].y),0);
+              r={R:fp.R,t:fp.t,err:fp.err,f:tracker.f,fKnown:!!tracker.fSet,fLocked:!!tracker.fLocked,corners,per,floor:true,inl:fp.inl};
+              if(floor.n<70&&floor.frames-floor.lastSeed>10) floor.seed(fp.R,fp.t,tracker.f,null);
+            }
+          }
+        }
         // The picture and the cabinet must come from the same frame. If the sheet slipped out of one frame,
         // keep showing the previous picture for a moment instead of letting the room slide under a frozen cabinet.
         if(r||!seenOnce||now-lastSeen>250) bctx.drawImage(work,0,0);
@@ -2071,10 +2233,11 @@ function smoothing(minCut,beta){
         let msg;
         if(!seenOnce) msg='Наведите камеру на лист';
         else if(!fresh) msg='Лист потерян — верните его в кадр или нажмите «Пауза»';
-        else { const dist=Math.hypot(last.t[0],last.t[1],last.t[2]); msg=last.per<0.09*Math.max(W,H)?'Лист далеко: подойдите ближе или распечатайте его на А3':`Лист найден · до него ${dist.toFixed(1).replace('.',',')} м`; }
-        if(Math.max(W,H)<1280&&seenOnce) msg=`Камера даёт мало точек (${W}×${H}), шкаф может дрожать. Помогут лист А3 или «Пауза»`;
+        else if(last.floor) msg='Держу по полу: лист можно не видеть. Двигайтесь плавно';
+        else { const dist=Math.hypot(last.t[0],last.t[1],last.t[2]); msg=last.per<0.09*Math.max(W,H)&&!(floor&&floor.n>=30)?'Лист далеко: подойдите ближе или распечатайте его на А3':`Лист найден · до него ${dist.toFixed(1).replace('.',',')} м`; }
+        if(Math.max(W,H)<1280&&seenOnce&&!(last&&last.floor)) msg=`Камера даёт мало точек (${W}×${H}), шкаф может дрожать. Помогут лист А3 или «Пауза»`;
         if(status.textContent!==msg) status.textContent=msg;
-        if(debug&&last) diag.textContent=`${W}×${H} · det ${dw}×${dh} ${avg.toFixed(0)} мс · f ${last.f.toFixed(0)}${last.fKnown?'':' (по умолч.)'} · err ${last.err.toFixed(2)}`;
+        if(debug&&last) diag.textContent=`${W}×${H} · det ${dw}×${dh} ${avg.toFixed(0)} мс · f ${last.f.toFixed(0)}${last.fKnown?'':' (по умолч.)'} · err ${last.err.toFixed(2)} · пол ${floor?floor.n:'-'}${last.floor?' ✓':''}`;
       } else {
         gl.style.opacity=seenOnce?1:0;
         const msg='Пауза: картинка остановлена, шкаф можно открывать и мерить';
@@ -2116,7 +2279,7 @@ function smoothing(minCut,beta){
       if(glbDirty){ glbDirty=false; rebuildGLB(); }
     };
     $('camClose').onclick=stop;
-    run={stop,view,pick,project,get last(){return last;},get seen(){return seenOnce;},get mode(){return mode;},get paused(){return paused;}};
+    run={stop,view,pick,project,get floor(){return floor;},get tracker(){return tracker;},get last(){return last;},get seen(){return seenOnce;},get mode(){return mode;},get paused(){return paused;}};
     try{ if(navigator.wakeLock) navigator.wakeLock.request('screen').catch(()=>{}); }catch(e){}
     frame();
     return run;
